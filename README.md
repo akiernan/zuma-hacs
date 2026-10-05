@@ -138,7 +138,7 @@ CoAP, no per-device key. Notes that shaped the entity:
   sends just power plus whatever was asked for, and never writes back stale fields
   over a change made from the app. Without a `lastTransitionPeriod` the device uses
   its default.
-- **Transition** enum: `instant, ms125, ms250, ms500, ms1000, ms2000, ms4000`; HA's
+- **Transition** enum: `instant, ms25, ms50, ms125, ms250, ms500, ms1000, ms2000, ms4000`; HA's
   transition seconds snap to the nearest bucket.
 
 ## What isn't possible locally

@@ -52,9 +52,9 @@ PATH_LIGHT = "zuma:lightState"
 LIGHT_MIN_KELVIN = 2200
 LIGHT_MAX_KELVIN = 6500
 
-# lastTransitionPeriod enum from the firmware, in milliseconds.
-LIGHT_TRANSITIONS = {0: "instant", 125: "ms125", 250: "ms250", 500: "ms500",
-                     1000: "ms1000", 2000: "ms2000", 4000: "ms4000"}
+# lastTransitionPeriod enum (NsdkZumaLightTransitionPeriod), keyed by milliseconds.
+LIGHT_TRANSITIONS = {0: "instant", 25: "ms25", 50: "ms50", 125: "ms125", 250: "ms250",
+                     500: "ms500", 1000: "ms1000", 2000: "ms2000", 4000: "ms4000"}
 
 # The device's volumeMap has 101 entries (-120 dB .. 0 dB), so volume is 0-100.
 VOLUME_MAX = 100

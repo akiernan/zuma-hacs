@@ -326,6 +326,15 @@ async def test_airable_playable_roles_rejects_containers(zuma_api, fake_session)
         await api.airable_playable_roles("airable:f")
 
 
+def test_light_transitions_cover_device_enum():
+    """Every NsdkZumaLightTransitionPeriod value is a bucket HA transitions can snap to."""
+    transitions = sys.modules["zuma_under_test.const"].LIGHT_TRANSITIONS
+    assert set(transitions.values()) == {
+        "instant", "ms25", "ms50", "ms125", "ms250", "ms500", "ms1000", "ms2000", "ms4000",
+    }
+    assert all(name == "instant" or name == f"ms{ms}" for ms, name in transitions.items())
+
+
 def test_thermal_modes_cover_device_enum(zuma_api):
     """Every NsdkZumaTemperatureMode value maps to a lowercase HA state."""
     import re
