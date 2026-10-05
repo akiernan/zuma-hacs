@@ -44,8 +44,9 @@
         "name": "Thermal mode",
         "state": {
           "normal": "Normal",
-          "limited": "Limited",
-          "shutdown": "Shutdown"
+          "led_limited": "LED limited",
+          "led_amp_limited": "LED and amplifier limited",
+          "led_amp_shutdown": "LED and amplifier shut down"
         }
       }
     },

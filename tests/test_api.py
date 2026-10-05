@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 
@@ -219,6 +221,15 @@ async def test_airable_playable_roles_rejects_containers(zuma_api, fake_session)
     api = zuma_api.ZumaApi("host.invalid", fake_session(reply))
     with pytest.raises(zuma_api.ZumaError, match="nothing playable"):
         await api.airable_playable_roles("airable:f")
+
+
+def test_thermal_modes_cover_device_enum(zuma_api):
+    """Every NsdkZumaTemperatureMode value maps to a lowercase HA state."""
+    import re
+
+    modes = sys.modules["zuma_under_test.const"].THERMAL_MODES
+    assert set(modes) == {"normal", "ledLimited", "ledAmpLimited", "ledAmpShutdown"}
+    assert all(re.fullmatch(r"[a-z0-9_]+", state) for state in modes.values())
 
 
 def test_player_fields_keeps_media_roles_for_resume(zuma_api):

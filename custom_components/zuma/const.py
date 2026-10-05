@@ -27,6 +27,13 @@ PATH_NETWORK_INFO = "network:info"
 # wireless.signalLevel is a cached figure that can sit unchanged for hours.
 PATH_WIRELESS_RSSI = "network:wirelessRssi"
 PATH_TEMP_MODE = "settings:/zuma/volatile/temperatureMode"
+# NsdkZumaTemperatureMode, mildest first, mapped to HA-safe (snake_case) states.
+THERMAL_MODES = {
+    "normal": "normal",
+    "ledLimited": "led_limited",
+    "ledAmpLimited": "led_amp_limited",
+    "ledAmpShutdown": "led_amp_shutdown",
+}
 PATH_BEZEL = "settings:/zuma/bezelAttached"
 PATH_MASTER = "settings:/system/zuma/zumaMaster"
 PATH_CIRCADIAN = "settings:/zuma/circadianLighting"

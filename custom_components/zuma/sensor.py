@@ -16,6 +16,7 @@ from homeassistant.const import EntityCategory, SIGNAL_STRENGTH_DECIBELS_MILLIWA
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .const import THERMAL_MODES
 from .coordinator import ZumaConfigEntry, ZumaCoordinator
 from .entity import ZumaEntity
 
@@ -59,9 +60,11 @@ SENSORS: tuple[ZumaSensorDescription, ...] = (
         key="thermal_mode",
         translation_key="thermal_mode",
         device_class=SensorDeviceClass.ENUM,
-        options=["normal", "limited", "shutdown"],
+        options=list(THERMAL_MODES.values()),
         entity_category=EntityCategory.DIAGNOSTIC,
-        value_fn=lambda c: c.data.get("thermal"),
+        # An unrecognised mode reads as unknown: an ENUM sensor may only report
+        # one of its options, and anything else would fail the state write.
+        value_fn=lambda c: THERMAL_MODES.get(c.data.get("thermal")),
     ),
 )
 

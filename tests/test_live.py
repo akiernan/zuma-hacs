@@ -126,5 +126,5 @@ async def test_diagnostics_present(api):
     print("\ndiagnostics:", json.dumps({k: st.get(k) for k in
         ("ip","ssid","rssi","thermal","bezel","master")}, indent=2))
     assert st["rssi"] is None or isinstance(st["rssi"], int | float)
-    assert st["thermal"] in (None, "normal", "limited", "shutdown")
+    assert st["thermal"] in (None, "normal", "ledLimited", "ledAmpLimited", "ledAmpShutdown")
     assert isinstance(st["master"], bool)

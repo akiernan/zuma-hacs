@@ -24,7 +24,7 @@ over the local network — no cloud, no account, no API key.
 | `media_player` now playing | `player:player/data` | state, title, artwork, `zuma_service` attribute |
 | `switch` circadian lighting | `settings:/zuma/circadianLighting` | mode toggle |
 | `switch` status LED curfew | `settings:/zuma/ledCurfewEnabled` | quiets the indicator LED overnight (config) |
-| `sensor` WiFi signal / IP / firmware / thermal mode | `network:wirelessRssi` (activated for a live reading), `network:info`, device identity, `zuma:volatile/temperatureMode` | read-only diagnostics |
+| `sensor` WiFi signal / IP / firmware / thermal mode | `network:wirelessRssi` (activated for a live reading), `network:info`, device identity, `settings:/zuma/volatile/temperatureMode` | read-only diagnostics |
 | `binary_sensor` smart bezel / area master | `settings:/zuma/bezelAttached`, `settings:/system/zuma/zumaMaster` | read-only diagnostics |
 
 Units are discovered automatically over mDNS (`_sues800device._tcp`); the TXT record's
@@ -142,7 +142,8 @@ CoAP, no per-device key. Notes that shaped the entity:
   (`zuma-metric-gatherer` reading `/sys/class/thermal/...`) but **publishes them only as
   MQTT telemetry to Zuma's cloud** — they are never written to a locally-readable node.
   The app's temperature figure comes from the cloud. The only local thermal signal is
-  the `thermal_mode` enum (`normal` → `limited` → `shutdown`), exposed as a sensor.
+  the `thermal_mode` enum (`normal` → `ledLimited` → `ledAmpLimited` → `ledAmpShutdown`),
+  exposed as a sensor.
 
 ## The device API, for reference
 
