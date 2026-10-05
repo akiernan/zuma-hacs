@@ -42,6 +42,7 @@ from .const import (
     PATH_MANUFACTURER,
     PATH_MASTER,
     PATH_NETWORK_INFO,
+    PATH_WIRELESS_RSSI,
     PATH_TEMP_MODE,
     PATH_MODEL,
     PATH_MUTE,
@@ -266,6 +267,23 @@ class ZumaApi:
             "setData", {"path": PATH_CONTROL, "role": "activate", "value": {"control": verb}}
         )
 
+    async def get_rssi(self) -> float | None:
+        """Live WiFi signal level in dBm, or None if it can't be sampled.
+
+        An action, not a value: activating the node takes a fresh reading.
+        A unit with no wireless link (e.g. on Ethernet) fails the action,
+        which is reported as no reading rather than an error.
+        """
+        try:
+            reply = await self._request(
+                "setData", {"path": PATH_WIRELESS_RSSI, "role": "activate", "value": None}
+            )
+        except ZumaError as err:
+            _LOGGER.debug("no RSSI reading: %s", err)
+            return None
+        value = unwrap_item(reply)
+        return value if isinstance(value, int | float) else None
+
     async def get_player_state(self) -> str | None:
         """Transport state string: stopped / playing / paused."""
         data = await self.get_value(PATH_PLAYER_DATA)
@@ -378,7 +396,7 @@ class ZumaApi:
             "ip": ip,
             "ssid": wifi.get("ssid"),
             "bssid": wifi.get("bssid"),
-            "rssi": wifi.get("signalLevel"),
+            "rssi": await self.get_rssi(),
             "frequency": wifi.get("frequency"),
             "thermal": await self.get_value(PATH_TEMP_MODE),
             "bezel": await self.get_value(PATH_BEZEL),

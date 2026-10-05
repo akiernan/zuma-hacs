@@ -91,6 +91,22 @@ async def test_non_json_success_raises(zuma_api, fake_session):
         await api.get_volume()
 
 
+async def test_get_rssi_activates_live_reading(zuma_api, fake_session):
+    """RSSI is sampled by activating network:wirelessRssi, not read from network:info."""
+    session = fake_session('{"double_": -54, "type": "double_"}')
+    api = zuma_api.ZumaApi("host.invalid", session)
+    assert await api.get_rssi() == -54
+    url, body = session.calls[0]
+    assert url.endswith("/api/setData")
+    assert body == {"path": "network:wirelessRssi", "role": "activate", "value": None}
+
+
+async def test_get_rssi_failure_is_no_reading(zuma_api, fake_session):
+    session = fake_session('{"error": {"message": "no wireless link"}}', status=500)
+    api = zuma_api.ZumaApi("host.invalid", session)
+    assert await api.get_rssi() is None
+
+
 async def test_get_rows_requests_structure(zuma_api, fake_session):
     """getRows asks for structure rows and returns them keyed by role."""
     session = fake_session(

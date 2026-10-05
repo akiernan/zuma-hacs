@@ -16,6 +16,9 @@ PATH_SERIAL = "settings:/system/serialNumber"
 PATH_MODEL = "settings:/system/modelName"
 PATH_MANUFACTURER = "settings:/system/manufacturer"
 PATH_NETWORK_INFO = "network:info"
+# Activating this samples the radio for a live signal level; network:info's
+# wireless.signalLevel is a cached figure that can sit unchanged for hours.
+PATH_WIRELESS_RSSI = "network:wirelessRssi"
 PATH_TEMP_MODE = "settings:/zuma/volatile/temperatureMode"
 PATH_BEZEL = "settings:/zuma/bezelAttached"
 PATH_MASTER = "settings:/system/zuma/zumaMaster"
