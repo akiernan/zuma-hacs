@@ -23,7 +23,7 @@ Two quirks drive the code below:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 import asyncio
 import json
 import logging
@@ -69,6 +69,9 @@ VOLUME_WRITE_SPACING = 0.3
 # landing just ahead of ours. So once a burst of writes settles, the volume is
 # read back after this long and, if the last value didn't take, written once more.
 VOLUME_VERIFY_DELAY = 1.0
+
+# How many requests a poll keeps in flight at once against the (embedded) device.
+READ_CONCURRENCY = 4
 
 
 class ZumaError(Exception):
@@ -162,6 +165,27 @@ def play_action(state: str | None, last_media_roles: Any) -> str | None:
     if state != "playing" and last_media_roles:
         return "replay"
     return None
+
+
+def network_fields(info: Any) -> dict[str, Any]:
+    """IP, SSID, BSSID and frequency from network:info.
+
+    network:info carries a type="networkInfo" tag, so get_value has already
+    unwrapped it to the inner object (keys: wireless, wired, gateways, ...).
+    Its signal level is a cached figure; live RSSI comes from get_rssi.
+    """
+    if not isinstance(info, dict):
+        info = {}
+    # Prefer whichever interface is up; a Lumisonic is normally on wireless.
+    wired, wifi = info.get("wired") or {}, info.get("wireless") or {}
+    iface = wired if wired.get("state") == "up" else wifi
+    addrs = iface.get("addresses") or []
+    return {
+        "ip": next((a.get("ip") for a in addrs if a.get("protocol") == "ipv4"), None),
+        "ssid": wifi.get("ssid"),
+        "bssid": wifi.get("bssid"),
+        "frequency": wifi.get("frequency"),
+    }
 
 
 def _light_update(value: Any) -> dict[str, Any] | None:
@@ -530,55 +554,64 @@ class ZumaApi:
             },
         )
 
+    async def _gather(self, *aws: Awaitable[Any]) -> list[Any]:
+        """Run requests concurrently, at most READ_CONCURRENCY in flight at once.
+
+        The device is embedded, so a poll's dozen requests go out a few at a
+        time rather than all together. The first failure is raised, as a
+        sequential run would.
+        """
+        limit = asyncio.Semaphore(READ_CONCURRENCY)
+
+        async def one(aw: Awaitable[Any]) -> Any:
+            async with limit:
+                return await aw
+
+        return await asyncio.gather(*(one(aw) for aw in aws))
+
     async def get_identity(self) -> dict[str, Any]:
         """Identity for the config flow and device registry.
 
         ``serial`` is the same UUID the unit publishes in its mDNS TXT record,
         so a manually-added entry and a discovered one resolve to one device.
         """
-        return {
-            "serial": await self.get_value(PATH_SERIAL),
-            "name": await self.get_value(PATH_DEVICE_NAME),
-            "version": await self.get_value(PATH_VERSION),
-            "model": await self.get_value(PATH_MODEL),
-            "manufacturer": await self.get_value(PATH_MANUFACTURER),
-        }
+        keys = ("serial", "name", "version", "model", "manufacturer")
+        paths = (PATH_SERIAL, PATH_DEVICE_NAME, PATH_VERSION, PATH_MODEL, PATH_MANUFACTURER)
+        return dict(zip(keys, await self._gather(*map(self.get_value, paths)), strict=True))
 
     async def get_state(self) -> dict[str, Any]:
         """One poll of everything the entities need.
 
         player:player/data is fetched once and mined for both transport state and
-        now-playing metadata (see player_fields).
+        now-playing metadata (see player_fields). Diagnostics ride along:
+        connectivity, live RSSI, thermal mode, accessory and group role.
         """
+        (
+            volume, mute, player, circadian, led_curfew, light,
+            info, rssi, thermal, bezel, master,
+        ) = await self._gather(
+            self.get_volume(),
+            self.get_mute(),
+            self.get_value(PATH_PLAYER_DATA),
+            self.get_value(PATH_CIRCADIAN),
+            self.get_value(PATH_LED_CURFEW),
+            self.get_light(),
+            self.get_value(PATH_NETWORK_INFO),
+            self.get_rssi(),
+            self.get_value(PATH_TEMP_MODE),
+            self.get_value(PATH_BEZEL),
+            self.get_value(PATH_MASTER),
+        )
         return {
-            "volume": await self.get_volume(),
-            "mute": await self.get_mute(),
-            **player_fields(await self.get_value(PATH_PLAYER_DATA)),
-            "circadian": await self.get_value(PATH_CIRCADIAN),
-            "led_curfew": await self.get_value(PATH_LED_CURFEW),
-            "light": await self.get_light(),
-            **await self._get_diagnostics(),
-        }
-
-    async def _get_diagnostics(self) -> dict[str, Any]:
-        """Read-only diagnostics: connectivity, thermal, accessory, group role."""
-        # network:info carries a type="networkInfo" tag, so get_value already
-        # unwraps it to the inner object (keys: wireless, wired, gateways, ...).
-        info = await self.get_value(PATH_NETWORK_INFO)
-        if not isinstance(info, dict):
-            info = {}
-        # Prefer whichever interface is up; a Lumisonic is normally on wireless.
-        wired, wifi = info.get("wired") or {}, info.get("wireless") or {}
-        iface = wired if wired.get("state") == "up" else wifi
-        addrs = iface.get("addresses") or []
-        ip = next((a.get("ip") for a in addrs if a.get("protocol") == "ipv4"), None)
-        return {
-            "ip": ip,
-            "ssid": wifi.get("ssid"),
-            "bssid": wifi.get("bssid"),
-            "rssi": await self.get_rssi(),
-            "frequency": wifi.get("frequency"),
-            "thermal": await self.get_value(PATH_TEMP_MODE),
-            "bezel": await self.get_value(PATH_BEZEL),
-            "master": await self.get_value(PATH_MASTER),
+            "volume": volume,
+            "mute": mute,
+            **player_fields(player),
+            "circadian": circadian,
+            "led_curfew": led_curfew,
+            "light": light,
+            **network_fields(info),
+            "rssi": rssi,
+            "thermal": thermal,
+            "bezel": bezel,
+            "master": master,
         }

@@ -483,6 +483,49 @@ def test_push_paths_cover_entity_state(zuma_api):
     }
 
 
+async def test_gather_caps_requests_in_flight(zuma_api):
+    """A poll keeps at most READ_CONCURRENCY requests open against the device."""
+    api = zuma_api.ZumaApi("host.invalid", None)
+    in_flight = peak = 0
+
+    async def request(i):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.01)
+        in_flight -= 1
+        return i
+
+    results = await api._gather(*(request(i) for i in range(11)))
+    assert results == list(range(11))
+    assert peak == zuma_api.READ_CONCURRENCY
+
+
+async def test_get_state_fails_if_any_read_fails(zuma_api, fake_session):
+    """One failed read fails the poll (as UpdateFailed upstream), not a partial state."""
+    session = fake_session('{"error": {"message": "Node is internal"}}', status=500)
+    api = zuma_api.ZumaApi("host.invalid", session)
+    with pytest.raises(zuma_api.ZumaError, match="Node is internal"):
+        await api.get_state()
+
+
+def test_network_fields_prefers_interface_that_is_up(zuma_api):
+    info = {
+        "wired": {"state": "down", "addresses": [{"ip": "10.0.0.2", "protocol": "ipv4"}]},
+        "wireless": {
+            "state": "up", "ssid": "Home", "bssid": "AA", "frequency": 5180,
+            "addresses": [
+                {"ip": "fd07::1", "protocol": "ipv6"},
+                {"ip": "192.168.1.25", "protocol": "ipv4"},
+            ],
+        },
+    }
+    assert zuma_api.network_fields(info) == {
+        "ip": "192.168.1.25", "ssid": "Home", "bssid": "AA", "frequency": 5180,
+    }
+    assert zuma_api.network_fields(None)["ip"] is None
+
+
 def test_play_action_resumes_paused_and_replays_stopped(zuma_api):
     """Paused resumes in place (pause toggles); stopped replays the remembered item."""
     roles = {"path": "airable:x", "type": "audio"}
