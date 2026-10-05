@@ -149,6 +149,18 @@ def player_fields(player: Any) -> dict[str, Any]:
     }
 
 
+def can_pause(state: str | None, controls: dict[str, Any]) -> bool:
+    """Whether what is playing can be paused, as the device advertises it.
+
+    A podcast episode reports controls.pause true and pauses; live radio
+    leaves pause out and a pause just stops it. A source playing with no
+    controls at all is given the benefit of the doubt.
+    """
+    if controls:
+        return bool(controls.get("pause"))
+    return state == "playing"
+
+
 def play_action(state: str | None, last_media_roles: Any) -> str | None:
     """How PLAY should start playback from this state, or None if it can't.
 

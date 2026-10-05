@@ -526,6 +526,19 @@ def test_network_fields_prefers_interface_that_is_up(zuma_api):
     assert zuma_api.network_fields(None)["ip"] is None
 
 
+def test_can_pause_follows_device_controls(zuma_api):
+    """Pause is offered only where the device advertises it."""
+    podcast = {"pause": True, "previous": True, "next_": False, "seekTime": True}
+    live_radio = {"previous": False, "next_": False, "seekTime": False}
+    assert zuma_api.can_pause("playing", podcast)
+    assert zuma_api.can_pause("paused", podcast)
+    assert not zuma_api.can_pause("playing", live_radio)
+    assert not zuma_api.can_pause("playing", {"pause": False})
+    # No controls at all: keep pause while playing, nothing to pause otherwise.
+    assert zuma_api.can_pause("playing", {})
+    assert not zuma_api.can_pause("stopped", {})
+
+
 def test_play_action_resumes_paused_and_replays_stopped(zuma_api):
     """Paused resumes in place (pause toggles); stopped replays the remembered item."""
     roles = {"path": "airable:x", "type": "audio"}

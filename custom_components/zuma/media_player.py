@@ -17,7 +17,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .api import ZumaError, play_action
+from .api import ZumaError, can_pause, play_action
 from .const import AIRABLE_RADIO_ID_PREFIX, VOLUME_MAX
 from .dlna import discover_avtransport, play_url, probe_mime
 from .coordinator import ZumaConfigEntry, ZumaCoordinator
@@ -57,7 +57,6 @@ class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
         MediaPlayerEntityFeature.VOLUME_SET
         | MediaPlayerEntityFeature.VOLUME_MUTE
         | MediaPlayerEntityFeature.VOLUME_STEP
-        | MediaPlayerEntityFeature.PAUSE
         | MediaPlayerEntityFeature.STOP
         | MediaPlayerEntityFeature.PLAY_MEDIA
         | MediaPlayerEntityFeature.BROWSE_MEDIA
@@ -69,16 +68,19 @@ class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
 
     @property
     def supported_features(self) -> MediaPlayerEntityFeature:
-        """Volume and pause/stop always; skip/prev only when the stream allows them.
+        """Volume and stop always; pause and skip only when the stream allows them.
 
-        The control node accepts `next`/`previous` for any stream, but on a live
-        broadcast they do nothing -- the device says so via controls.next_ and
-        controls.previous, so trust that rather than advertising dead buttons.
+        The control node accepts pause/next/previous for any stream, but on a
+        live broadcast they don't do what they say -- pause just stops it -- and
+        the device says so via controls, so trust that rather than advertising
+        dead buttons.
         """
         features = self._BASE_FEATURES
         if self._play_action() is not None:
             features |= MediaPlayerEntityFeature.PLAY
         controls = self.coordinator.data.get("controls") or {}
+        if can_pause(self.coordinator.data.get("state"), controls):
+            features |= MediaPlayerEntityFeature.PAUSE
         if controls.get("next_"):
             features |= MediaPlayerEntityFeature.NEXT_TRACK
         if controls.get("previous"):
@@ -139,7 +141,7 @@ class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
             raise HomeAssistantError("Nothing to resume: start a station first")
 
     async def async_media_pause(self) -> None:
-        """Pause. Live streams report `stopped` rather than `paused` afterwards."""
+        """Pause; offered only when the stream advertises it (see can_pause)."""
         # pause toggles, so on an already-paused player it would resume instead.
         if self.coordinator.data.get("state") == "paused":
             return

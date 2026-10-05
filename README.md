@@ -18,7 +18,7 @@ over the local network — no cloud, no account, no API key.
 |---|---|---|
 | `light` | `zuma:lightState` | on/off, brightness, colour temperature (2200–6500 K) |
 | `media_player` volume / mute | `player:volume`, `settings:/mediaPlayer/mute` | volume 0–100 ↔ HA 0.0–1.0 |
-| `media_player` transport | `player:player/control` | pause, stop; next/previous only when the stream reports them; play resumes a pause in place, or restarts the last airable item once stopped |
+| `media_player` transport | `player:player/control` | stop; pause and next/previous only when the stream reports them (live radio can't pause, podcasts can); play resumes a pause in place, or restarts the last airable item once stopped |
 | `media_player` play airable | `airable:` → `player:player/control` | `media_player.play_media` with an airable station id — native internet radio |
 | `media_player` play URL | DLNA `AVTransport` | `media_player.play_media` — start any other stream URL |
 | `media_player` now playing | `player:player/data` | state, title, artwork, `zuma_service` attribute |
