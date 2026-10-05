@@ -11,8 +11,8 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import ZumaApi, ZumaError
-from .const import DOMAIN, PUSH_PATHS, SCAN_INTERVAL_SECONDS
+from .api import PUSH_UPDATERS, ZumaApi, ZumaError, push_updates
+from .const import DOMAIN, SCAN_INTERVAL_SECONDS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,9 +26,9 @@ class ZumaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Refresh device state, driven by the device's own change events.
 
     The device exposes a long-poll event queue: subscribe to the fast-changing
-    leaf nodes, then a poll blocks until one of them changes and names the path.
-    On any event we do a full refresh, so a volume/light change made from the app
-    or the unit shows up in HA in ~2 s instead of waiting for the periodic poll.
+    leaf nodes, then a poll blocks until one of them changes and returns its new
+    value. Values are applied straight into coordinator data, so a volume/light
+    change made from the app or the unit shows up in HA within about a second.
     Polling stays on as a slow safety net (and to catch the rare-change
     diagnostics the push set does not subscribe to).
     """
@@ -56,28 +56,40 @@ class ZumaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             raise UpdateFailed(str(err)) from err
 
     async def async_run_push_listener(self) -> None:
-        """Long-poll the event queue forever, refreshing on each change.
+        """Long-poll the event queue forever, applying each change as it arrives.
 
         Runs as a background task for the life of the config entry. Resilient by
-        design: a client-timeout is a normal heartbeat (re-poll, keep the queue);
-        any real error drops the queue id and rebuilds it after a short wait.
+        design: an idle poll returns empty and is simply repeated; any real error
+        drops the queue id and rebuilds it after a short wait, then resyncs.
         """
         queue_id: str | None = None
+        # Set when a queue is lost: anything queued on it died with it, so the
+        # rebuilt queue starts with a full refresh rather than trusting stale data.
+        resync = False
         while True:
             try:
                 if queue_id is None:
-                    queue_id = await self.api.create_event_queue(list(PUSH_PATHS))
+                    queue_id = await self.api.create_event_queue(list(PUSH_UPDATERS))
                     _LOGGER.debug("%s: event queue %s", self.name, queue_id)
-                changed = await self.api.poll_events(queue_id)
-                if changed:
-                    _LOGGER.debug("%s: push %s", self.name, changed)
-                    await self.async_request_refresh()
+                    if resync:
+                        resync = False
+                        await self.async_request_refresh()
+                events = await self.api.poll_events(queue_id)
+                if events:
+                    _LOGGER.debug("%s: push %s", self.name, events)
+                    updates, refresh = push_updates(events)
+                    if updates and self.data is not None:
+                        self.async_set_updated_data({**self.data, **updates})
+                    if refresh:
+                        await self.async_request_refresh()
             except asyncio.CancelledError:
                 raise
             except TimeoutError:
-                # No change within the poll window -- expected; just poll again.
+                # The device should answer an idle poll itself; a client timeout means
+                # it didn't, so keep the queue and poll again.
                 continue
             except Exception as err:  # noqa: BLE001 -- keep the loop alive on any fault
                 _LOGGER.debug("%s: push reset (%s)", self.name, err)
                 queue_id = None
+                resync = True
                 await asyncio.sleep(_PUSH_RETRY_SECONDS)

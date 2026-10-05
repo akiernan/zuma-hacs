@@ -158,8 +158,8 @@ async def test_get_light_unwraps_state(zuma_api, fake_session):
     assert light == {"power": True, "brightness": 17, "temperature": 3869}
 
 
-async def test_create_event_queue_subscribes_as_item(zuma_api, fake_session):
-    """Leaf nodes subscribe with type 'item'; queue id is returned."""
+async def test_create_event_queue_subscribes_with_value(zuma_api, fake_session):
+    """Leaf nodes subscribe as itemWithValue so events carry the new value."""
     session = fake_session('"{q-123}"')
     api = zuma_api.ZumaApi("host.invalid", session)
     qid = await api.create_event_queue(["player:volume", "zuma:lightState"])
@@ -168,18 +168,86 @@ async def test_create_event_queue_subscribes_as_item(zuma_api, fake_session):
     assert url.endswith("/api/event/modifyQueue")
     assert "queueId" not in body
     assert body["subscribe"] == [
-        {"path": "player:volume", "type": "item"},
-        {"path": "zuma:lightState", "type": "item"},
+        {"path": "player:volume", "type": "itemWithValue"},
+        {"path": "zuma:lightState", "type": "itemWithValue"},
     ]
 
 
-async def test_poll_events_returns_changed_paths(zuma_api, fake_session):
-    """pollQueue's event array is reduced to the list of changed paths."""
-    reply = '[{"itemType": "update", "rowsEvents": [], "path": "player:volume"}]'
+async def test_poll_events_timeout_is_seconds(zuma_api, fake_session):
+    """The device reads pollQueue's timeout as seconds, not milliseconds."""
+    session = fake_session("[]")
+    api = zuma_api.ZumaApi("host.invalid", session)
+    await api.poll_events("{q-123}")
+    url, body = session.calls[0]
+    assert url.endswith("/api/event/pollQueue")
+    assert body == {"queueId": "{q-123}", "timeout": zuma_api.PUSH_POLL_TIMEOUT_SECONDS}
+    assert zuma_api.PUSH_POLL_TIMEOUT_SECONDS < 120
+
+
+async def test_poll_events_returns_unwrapped_values(zuma_api, fake_session):
+    """Each event yields (path, unwrapped itemValue), in order."""
+    reply = (
+        '[{"itemType": "update", "rowsEvents": [], "path": "player:volume",'
+        ' "itemValue": {"type": "i32_", "i32_": 31}},'
+        ' {"itemType": "update", "rowsEvents": [], "path": "zuma:lightState",'
+        ' "itemValue": {"type": "zumaLightState", "zumaLightState":'
+        ' {"power": true, "brightness": 86, "temperature": 4350}}},'
+        ' {"itemType": "remove", "rowsEvents": [], "path": "player:player/data"}]'
+    )
     api = zuma_api.ZumaApi("host.invalid", fake_session(reply))
-    assert await api.poll_events("{q-123}") == ["player:volume"]
+    assert await api.poll_events("{q-123}") == [
+        ("player:volume", 31),
+        ("zuma:lightState", {"power": True, "brightness": 86, "temperature": 4350}),
+        ("player:player/data", None),
+    ]
 
 
 async def test_poll_events_tolerates_empty(zuma_api, fake_session):
     api = zuma_api.ZumaApi("host.invalid", fake_session("[]"))
     assert await api.poll_events("{q-123}") == []
+
+
+def test_push_updates_last_value_wins(zuma_api):
+    """A burst (a slider drag) collapses to its final value per key."""
+    updates, refresh = zuma_api.push_updates([
+        ("zuma:lightState", {"power": True, "brightness": 86}),
+        ("player:volume", 20),
+        ("zuma:lightState", {"power": True, "brightness": 32}),
+        ("settings:/mediaPlayer/mute", False),
+    ])
+    assert updates == {
+        "light": {"power": True, "brightness": 32},
+        "volume": 20,
+        "mute": False,
+    }
+    assert refresh is False
+
+
+def test_push_updates_maps_player_data(zuma_api):
+    """player:player/data events fill the same keys a full poll would."""
+    updates, refresh = zuma_api.push_updates([
+        ("player:player/data", {"state": "playing", "trackRoles": {"title": "Radio X"}}),
+    ])
+    assert updates["state"] == "playing"
+    assert updates["title"] == "Radio X"
+    assert updates["controls"] == {}
+    assert refresh is False
+
+
+def test_push_updates_falls_back_to_refresh(zuma_api):
+    """A valueless event or an unknown path can only be resolved by reading."""
+    assert zuma_api.push_updates([("player:volume", None)]) == ({}, True)
+    assert zuma_api.push_updates([("other:node", 1)]) == ({}, True)
+    assert zuma_api.push_updates([("zuma:lightState", "garbage")]) == ({}, True)
+
+
+def test_push_paths_cover_entity_state(zuma_api):
+    """Every subscribed path is one the coordinator knows how to apply."""
+    assert set(zuma_api.PUSH_UPDATERS) == {
+        "player:volume",
+        "settings:/mediaPlayer/mute",
+        "player:player/data",
+        "zuma:lightState",
+        "settings:/zuma/circadianLighting",
+        "settings:/zuma/ledCurfewEnabled",
+    }

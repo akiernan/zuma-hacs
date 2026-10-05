@@ -7,7 +7,7 @@ official nSDK bindings make them:
     POST /api/getRows            {"path", "roles": [..], "from", "to", "type": "structure"}
     POST /api/setData            {"path", "role", "value"}
     POST /api/event/modifyQueue  {"queueId"?, "subscribe": [..], "unsubscribe": [..]}
-    POST /api/event/pollQueue    {"queueId", "timeout"}
+    POST /api/event/pollQueue    {"queueId", "timeout": <seconds>}
 
 ``"type": "structure"`` makes getData answer with an object keyed by role name
 (``{"value": ..., "title": ...}``) and getRows with one such object per row,
@@ -23,6 +23,7 @@ Two quirks drive the code below:
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import json
 import logging
 from collections.abc import Sequence
@@ -46,6 +47,7 @@ from .const import (
     PATH_MUTE,
     PATH_PLAYER_DATA,
     PATH_SERIAL,
+    PUSH_POLL_TIMEOUT_SECONDS,
     PATH_VERSION,
     PATH_VOLUME,
     VOLUME_MAX,
@@ -66,7 +68,7 @@ def unwrap(reply: Any, role: str = "value") -> Any:
 
 
 def unwrap_item(item: Any) -> Any:
-    """Unwrap one tagged value.
+    """Unwrap one tagged value: a getData role or an event's ``itemValue``.
 
     A scalar leaf is tagged (``{"i32_": 22, "type": "i32_"}``); a composite node
     such as ``player:player/data`` is a plain untagged dict and is returned as-is.
@@ -88,6 +90,64 @@ def wrap(value: bool | int | str) -> dict[str, Any]:
     if isinstance(value, str):
         return {"string_": value, "type": "string_"}
     raise TypeError(f"no StreamSDK tag for {type(value).__name__}")
+
+
+def player_fields(player: Any) -> dict[str, Any]:
+    """Mine player:player/data for transport state and now-playing metadata.
+
+    It carries the lot, whatever the source is (airable radio, Spotify Connect,
+    AirPlay, TIDAL).
+    """
+    if not isinstance(player, dict):
+        player = {}
+    track = player.get("trackRoles") or {}
+    meta = (track.get("mediaData") or {}).get("metaData") or {}
+    return {
+        "state": player.get("state"),
+        "title": track.get("title"),
+        "image": track.get("icon"),
+        "source": meta.get("serviceID"),
+        # The device advertises per-stream which transport ops are valid; live
+        # radio reports next_/previous false even though the verbs are accepted.
+        "controls": player.get("controls") or {},
+    }
+
+
+def _light_update(value: Any) -> dict[str, Any] | None:
+    return {"light": value} if isinstance(value, dict) else None
+
+
+# Leaf nodes the push listener subscribes to, and how each event's value folds
+# into coordinator data. Subscribed as itemWithValue, so an event carries the new
+# value and applying it needs no read-back.
+PUSH_UPDATERS: dict[str, Callable[[Any], dict[str, Any] | None]] = {
+    PATH_VOLUME: lambda v: {"volume": v},
+    PATH_MUTE: lambda v: {"mute": v},
+    PATH_PLAYER_DATA: player_fields,
+    PATH_LIGHT: _light_update,
+    PATH_CIRCADIAN: lambda v: {"circadian": v},
+    PATH_LED_CURFEW: lambda v: {"led_curfew": v},
+}
+
+
+def push_updates(events: list[tuple[str, Any]]) -> tuple[dict[str, Any], bool]:
+    """Fold (path, value) events into coordinator-data updates.
+
+    Events apply in order, so the last of a burst (a slider drag yields a dozen)
+    wins. Returns the updates and whether a full refresh is still needed: an
+    event with no value, or for a path with no updater, can only be resolved by
+    reading the device.
+    """
+    updates: dict[str, Any] = {}
+    refresh = False
+    for path, value in events:
+        updater = PUSH_UPDATERS.get(path)
+        update = updater(value) if updater and value is not None else None
+        if update is None:
+            refresh = True
+        else:
+            updates.update(update)
+    return updates, refresh
 
 
 class ZumaApi:
@@ -216,34 +276,42 @@ class ZumaApi:
     async def create_event_queue(self, paths: list[str]) -> str:
         """Create a change-notification queue subscribed to leaf nodes.
 
-        Leaf nodes subscribe with type ``item`` (containers would use ``rows``);
-        the device then pushes ``{"itemType": "update", "path": ...}`` when one
-        changes. Returns the queue id (a brace-wrapped UUID) to poll.
+        Leaf nodes subscribe with type ``itemWithValue`` (containers would use
+        ``rows``); the device then pushes ``{"itemType": "update", "path": ...,
+        "itemValue": <tagged value>}`` when one changes. Returns the queue id (a
+        brace-wrapped UUID) to poll.
         """
         qid = await self._request(
             "event/modifyQueue",
-            {"subscribe": [{"path": p, "type": "item"} for p in paths]},
+            {"subscribe": [{"path": p, "type": "itemWithValue"} for p in paths]},
         )
         if not isinstance(qid, str):
             raise ZumaError(f"unexpected modifyQueue reply: {qid!r}")
         return qid
 
-    async def poll_events(self, queue_id: str, client_timeout: float = 90.0) -> list[str]:
-        """Long-poll the queue; return the list of changed paths.
+    async def poll_events(
+        self, queue_id: str, timeout: int = PUSH_POLL_TIMEOUT_SECONDS
+    ) -> list[tuple[str, Any]]:
+        """Long-poll the queue; return (path, unwrapped value) per change, in order.
 
-        The device holds the connection until a subscribed node changes (it does
-        not honour the ``timeout`` param as an idle return), so ``client_timeout``
-        is the liveness ceiling: on expiry the caller simply re-polls. A stale
-        queue id yields HTTP 400 "Unknown queue id!", surfaced as ZumaError.
+        The device holds the connection until a subscribed node changes or
+        ``timeout`` *seconds* pass, then answers with an empty list. The client
+        timeout sits a little above it so a quiet queue never trips it. The value
+        is None if an event carries none (e.g. a removal). A stale queue id yields
+        HTTP 400 "Unknown queue id!", surfaced as ZumaError.
         """
         events = await self._request(
             "event/pollQueue",
-            {"queueId": queue_id, "timeout": 30000},
-            timeout=aiohttp.ClientTimeout(total=client_timeout),
+            {"queueId": queue_id, "timeout": timeout},
+            timeout=aiohttp.ClientTimeout(total=timeout + 5),
         )
         if not isinstance(events, list):
             return []
-        return [e["path"] for e in events if isinstance(e, dict) and e.get("path")]
+        return [
+            (e["path"], unwrap_item(e.get("itemValue")))
+            for e in events
+            if isinstance(e, dict) and e.get("path")
+        ]
 
     async def get_light(self) -> dict[str, Any] | None:
         """Current lamp state: {power, brightness 0-100, temperature K, ...}."""
@@ -282,24 +350,12 @@ class ZumaApi:
         """One poll of everything the entities need.
 
         player:player/data is fetched once and mined for both transport state and
-        now-playing metadata -- it carries the lot, whatever the source is
-        (airable radio, Spotify Connect, AirPlay, TIDAL).
+        now-playing metadata (see player_fields).
         """
-        player = await self.get_value(PATH_PLAYER_DATA)
-        if not isinstance(player, dict):
-            player = {}
-        track = player.get("trackRoles") or {}
-        meta = (track.get("mediaData") or {}).get("metaData") or {}
         return {
             "volume": await self.get_volume(),
             "mute": await self.get_mute(),
-            "state": player.get("state"),
-            "title": track.get("title"),
-            "image": track.get("icon"),
-            "source": meta.get("serviceID"),
-            # The device advertises per-stream which transport ops are valid; live
-            # radio reports next_/previous false even though the verbs are accepted.
-            "controls": player.get("controls") or {},
+            **player_fields(await self.get_value(PATH_PLAYER_DATA)),
             "circadian": await self.get_value(PATH_CIRCADIAN),
             "led_curfew": await self.get_value(PATH_LED_CURFEW),
             "light": await self.get_light(),

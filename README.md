@@ -31,9 +31,10 @@ serial becomes the unique ID, so discovered and manually-added entries resolve t
 device. Manual setup by IP also works.
 
 State changes are **pushed**: the integration long-polls the device's event queue
-(`/api/event/*`, subscribing to leaf nodes as type `item`) and refreshes within ~2 s
-of a change made from the app or the unit itself. A 10 s poll runs as a fallback and
-catches changes push doesn't signal (notably app/CoAP-driven light changes).
+(`/api/event/*`, subscribing to leaf nodes as type `itemWithValue`). Each event carries
+the node's new value, which is applied directly, so a change made from the app or the
+unit itself shows up within about a second -- app-driven light changes included. A
+10 s poll runs as a safety net and refreshes the diagnostics push doesn't cover.
 
 ## Install
 
@@ -123,7 +124,7 @@ POST /api/getData            {"path":..,"roles":[..],"type":"structure"}
 POST /api/getRows            {"path":..,"roles":[..],"from":<i>,"to":<i>,"type":"structure"}
 POST /api/setData            {"path":..,"role":..,"value":..}
 POST /api/event/modifyQueue  {"queueId":..,"subscribe":[..],"unsubscribe":[..]}
-POST /api/event/pollQueue    {"queueId":..,"timeout":..}
+POST /api/event/pollQueue    {"queueId":..,"timeout":<seconds>}
 ```
 
 `"type": "structure"` makes getData answer with an object keyed by role name

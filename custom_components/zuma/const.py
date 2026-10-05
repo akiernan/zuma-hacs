@@ -42,11 +42,9 @@ LIGHT_TRANSITIONS = {0: "instant", 125: "ms125", 250: "ms250", 500: "ms500",
 # The device's volumeMap has 101 entries (-120 dB .. 0 dB), so volume is 0-100.
 VOLUME_MAX = 100
 
-# Poll cadence. Push (the event queue) delivers most changes in ~2 s, but it only
-# fires for the node actually written -- an app/CoAP-driven light change updates the
-# internal node and the zuma: mirror doesn't reliably signal it, so that case relies
-# on this poll. Keep it at 10 s so the worst case stays snappy rather than pushing the
-# interval out and letting missed events lag.
+# Poll cadence. Push (the event queue) delivers changes within about a second,
+# including app-driven light changes on zuma:lightState, so this poll is only a
+# safety net and the source of the rarely-changing diagnostics push doesn't cover.
 SCAN_INTERVAL_SECONDS = 10
 
 # The full transport vocabulary accepted by player:player/control. Swept exhaustively:
@@ -54,13 +52,6 @@ SCAN_INTERVAL_SECONDS = 10
 CONTROL_VERBS = ("pause", "stop", "next", "previous")
 
 
-# Leaf nodes the push listener subscribes to (type "item"). Any event triggers a
-# full state refresh, so this only needs the fast-changing nodes, not every leaf.
-PUSH_PATHS = (
-    "player:volume",
-    "settings:/mediaPlayer/mute",
-    "player:player/data",
-    "zuma:lightState",
-    "settings:/zuma/circadianLighting",
-    "settings:/zuma/ledCurfewEnabled",
-)
+# pollQueue's timeout is in seconds: the device answers with an empty list once it
+# passes with nothing queued. The client timeout sits a little above it.
+PUSH_POLL_TIMEOUT_SECONDS = 30
