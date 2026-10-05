@@ -34,6 +34,8 @@ import aiohttp
 from .const import (
     CONTROL_VERBS,
     PATH_CIRCADIAN,
+    AIRABLE_RADIO_ID_PREFIX,
+    PATH_AIRABLE,
     PATH_CONTROL,
     PATH_DEVICE_NAME,
     PATH_LED_CURFEW,
@@ -111,7 +113,28 @@ def player_fields(player: Any) -> dict[str, Any]:
         # The device advertises per-stream which transport ops are valid; live
         # radio reports next_/previous false even though the verbs are accepted.
         "controls": player.get("controls") or {},
+        # What is playing, in the form a play command takes back. Present only
+        # while something plays: it disappears from player:player/data on stop.
+        "media_roles": player.get("mediaRoles") or None,
     }
+
+
+def play_action(state: str | None, last_media_roles: Any) -> str | None:
+    """How PLAY should start playback from this state, or None if it can't.
+
+    "resume": the player is paused. pause is a toggle -- sent while paused it
+    carries on from the same position -- whereas re-sending the item's roles
+    restarts it from the beginning, and a bare play stops it outright.
+
+    "replay": stopped, with an airable item remembered. Its roles are sent
+    again; the device keeps no position once stopped, so a podcast starts over
+    (live radio has no position to lose).
+    """
+    if state == "paused":
+        return "resume"
+    if state != "playing" and last_media_roles:
+        return "replay"
+    return None
 
 
 def _light_update(value: Any) -> dict[str, Any] | None:
@@ -159,6 +182,7 @@ class ZumaApi:
     ) -> None:
         self._host = host
         self._session = session
+        self._airable_root: str | None = None
         self._timeout = aiohttp.ClientTimeout(total=timeout)
 
     @property
@@ -256,10 +280,10 @@ class ZumaApi:
     async def control(self, verb: str) -> Any:
         """Invoke a transport verb on player:player/control.
 
-        Only pause/stop/next/previous exist. An unrecognised value shape is not
-        rejected as such -- the device falls back to "play the current directory"
-        and reports "Directory is empty. No playable items found.", which is why
-        a bad verb looks like a playback failure.
+        Covers the verbs that act on what is already playing. ``play`` is
+        deliberately not one: it needs the item's roles, see play_roles. Sent
+        bare, the device falls back to "play the current directory" and reports
+        "Directory is empty. No playable items found.".
         """
         if verb not in CONTROL_VERBS:
             raise ValueError(f"unknown control verb {verb!r}; have {CONTROL_VERBS}")
@@ -283,6 +307,60 @@ class ZumaApi:
             return None
         value = unwrap_item(reply)
         return value if isinstance(value, int | float) else None
+
+    async def play_roles(self, media_roles: dict[str, Any]) -> Any:
+        """Start playback of an item, given its roles as the device reported them.
+
+        This is the play half of player:player/control: unlike the transport
+        verbs it needs to know *what* to play, and the device wants the item's
+        full roles (path, context, mediaData with its prePlayPath, ...) exactly
+        as browsing returned them. It resolves the stream itself.
+        """
+        return await self._request(
+            "setData",
+            {
+                "path": PATH_CONTROL,
+                "role": "activate",
+                "value": {"control": "play", "playMode": "normal", "mediaRoles": media_roles},
+            },
+        )
+
+    async def airable_root(self) -> str:
+        """The airable browse root, with the account's host. Cached once known."""
+        if self._airable_root is None:
+            path = unwrap(await self.get_data(PATH_AIRABLE, ("path",)), "path")
+            if not isinstance(path, str) or not path.startswith("airable:"):
+                raise ZumaError(f"device reported no airable root: {path!r}")
+            self._airable_root = path.rstrip("/")
+        return self._airable_root
+
+    async def airable_playable_roles(self, path: str) -> dict[str, Any]:
+        """The first row an airable path lists, with every role (@all), if playable.
+
+        A station is a playable container whose first row is its audio item, and
+        a podcast's episodes list starts with its newest episode; those roles are
+        what play_roles takes. A leaf item's own path (a single episode's
+        ``/id/airable/feed.episode/<id>``) can't be listed: the device answers
+        "Error during communication with server".
+        """
+        reply = await self._request(
+            "getRows",
+            {"path": path, "roles": ["@all"], "from": 0, "to": 1, "type": "structure"},
+        )
+        rows = reply.get("rows") if isinstance(reply, dict) else None
+        row = rows[0] if rows else None
+        if not isinstance(row, dict) or row.get("type") != "audio":
+            raise ZumaError(f"nothing playable at {path}")
+        return row
+
+    async def airable_station_roles(self, station: str) -> dict[str, Any]:
+        """Look an airable radio station up by id, as the Zuma apps do.
+
+        Takes the bare numeric id or the device's ``airable://airable/radio/<id>``.
+        """
+        station_id = station.removeprefix(AIRABLE_RADIO_ID_PREFIX)
+        root = await self.airable_root()
+        return await self.airable_playable_roles(f"{root}/id/airable/radio/{station_id}")
 
     async def get_player_state(self) -> str | None:
         """Transport state string: stopped / playing / paused."""

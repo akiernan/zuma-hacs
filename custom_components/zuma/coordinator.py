@@ -8,7 +8,7 @@ import logging
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import PUSH_UPDATERS, ZumaApi, ZumaError, push_updates
@@ -48,6 +48,23 @@ class ZumaCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.identity: dict[str, Any] = {}
         # Cached DLNA AVTransport control URL (ephemeral port; re-discovered on failure).
         self.avtransport_url: str | None = None
+        # The last airable item seen playing, kept so PLAY can resume it: the
+        # device drops mediaRoles from player:player/data as soon as it stops.
+        self.last_media_roles: dict[str, Any] | None = None
+
+    @callback
+    def async_update_listeners(self) -> None:
+        """Remember what is playing before entities see the new data.
+
+        Every update -- a full refresh or a pushed value -- passes through here.
+        Only airable items are kept: re-sending their roles is known to restart
+        them, while other sources (AirPlay, Spotify Connect) are driven from the
+        sending app and have not been shown to replay.
+        """
+        roles = (self.data or {}).get("media_roles")
+        if isinstance(roles, dict) and str(roles.get("path", "")).startswith("airable:"):
+            self.last_media_roles = roles
+        super().async_update_listeners()
 
     async def _async_update_data(self) -> dict[str, Any]:
         try:

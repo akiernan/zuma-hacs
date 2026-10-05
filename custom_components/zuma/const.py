@@ -10,6 +10,13 @@ PATH_VOLUME = "player:volume"
 PATH_MUTE = "settings:/mediaPlayer/mute"
 PATH_PLAYER_DATA = "player:player/data"
 PATH_CONTROL = "player:player/control"
+# Airable (internet radio, podcasts) browse root. Its `path` role names the
+# account-specific airable host the device navigates, e.g.
+# airable:https://8779202999.airable.io/ -- never hardcode that host.
+PATH_AIRABLE = "airable:"
+# The device's own id for an airable radio station: the stable handle a station
+# can be played by, whatever host the account is on.
+AIRABLE_RADIO_ID_PREFIX = "airable://airable/radio/"
 PATH_DEVICE_NAME = "settings:/deviceName"
 PATH_VERSION = "settings:/version"
 PATH_SERIAL = "settings:/system/serialNumber"
@@ -50,8 +57,8 @@ VOLUME_MAX = 100
 # safety net and the source of the rarely-changing diagnostics push doesn't cover.
 SCAN_INTERVAL_SECONDS = 10
 
-# The full transport vocabulary accepted by player:player/control. Swept exhaustively:
-# there is no play/resume verb at any spelling, so playback cannot be started here.
+# Transport verbs for player:player/control that act on what is already playing.
+# "play" exists too, but only with the item's roles attached (ZumaApi.play_roles).
 CONTROL_VERBS = ("pause", "stop", "next", "previous")
 
 

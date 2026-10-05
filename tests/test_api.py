@@ -146,10 +146,87 @@ async def test_control_sends_expected_payload(zuma_api, fake_session):
 
 
 async def test_control_rejects_unknown_verb(zuma_api, fake_session):
-    """play/resume do not exist on this device; fail loudly instead of silently."""
+    """play needs the item's roles (play_roles); a bare verb fails loudly."""
     api = zuma_api.ZumaApi("host.invalid", fake_session("null"))
     with pytest.raises(ValueError, match="unknown control verb"):
         await api.control("play")
+
+
+STATION_ROW = (
+    '{"type": "audio", "title": "Radio X UK",'
+    ' "id": "airable://airable/radio/6495847017504275",'
+    ' "path": "airable:https://8779202999.airable.io/id/airable/radio/6495847017504275",'
+    ' "mediaData": {"metaData": {"serviceID": "airableRadios"}}}'
+)
+
+
+async def test_play_roles_sends_play_with_media_roles(zuma_api, fake_session):
+    """play goes to the control node with the item's roles and a play mode."""
+    session = fake_session("null")
+    api = zuma_api.ZumaApi("host.invalid", session)
+    roles = {"type": "audio", "path": "airable:x"}
+    await api.play_roles(roles)
+    url, body = session.calls[0]
+    assert url.endswith("/api/setData")
+    assert body == {
+        "path": "player:player/control",
+        "role": "activate",
+        "value": {"control": "play", "playMode": "normal", "mediaRoles": roles},
+    }
+
+
+async def test_airable_station_roles_looks_up_under_device_root(zuma_api, fake_session):
+    """The station is found under the root the device reports, never a fixed host."""
+    session = fake_session([
+        '{"path": "airable:https://8779202999.airable.io/"}',
+        '{"rowsCount": 4, "rows": [' + STATION_ROW + "]}",
+    ])
+    api = zuma_api.ZumaApi("host.invalid", session)
+    roles = await api.airable_station_roles("airable://airable/radio/6495847017504275")
+    assert roles["title"] == "Radio X UK"
+
+    (_, root_req), (url, rows_req) = session.calls
+    assert root_req == {"path": "airable:", "roles": ["path"], "type": "structure"}
+    assert url.endswith("/api/getRows")
+    assert rows_req == {
+        "path": "airable:https://8779202999.airable.io/id/airable/radio/6495847017504275",
+        "roles": ["@all"],
+        "from": 0,
+        "to": 1,
+        "type": "structure",
+    }
+
+
+async def test_airable_root_is_cached(zuma_api, fake_session):
+    session = fake_session([
+        '{"path": "airable:https://h.airable.io/"}',
+        '{"rows": [' + STATION_ROW + "]}",
+        '{"rows": [' + STATION_ROW + "]}",
+    ])
+    api = zuma_api.ZumaApi("host.invalid", session)
+    await api.airable_station_roles("1")
+    await api.airable_station_roles("2")
+    assert [body["path"] for _, body in session.calls] == [
+        "airable:",
+        "airable:https://h.airable.io/id/airable/radio/1",
+        "airable:https://h.airable.io/id/airable/radio/2",
+    ]
+
+
+async def test_airable_playable_roles_rejects_containers(zuma_api, fake_session):
+    """A path whose first row isn't an audio item has nothing to play."""
+    reply = '{"rows": [{"type": "container", "title": "Favorites", "path": "airable:f"}]}'
+    api = zuma_api.ZumaApi("host.invalid", fake_session(reply))
+    with pytest.raises(zuma_api.ZumaError, match="nothing playable"):
+        await api.airable_playable_roles("airable:f")
+
+
+def test_player_fields_keeps_media_roles_for_resume(zuma_api):
+    playing = zuma_api.player_fields(
+        {"state": "playing", "mediaRoles": {"path": "airable:x"}, "trackRoles": {"title": "T"}}
+    )
+    assert playing["media_roles"] == {"path": "airable:x"}
+    assert zuma_api.player_fields({"state": "stopped"})["media_roles"] is None
 
 
 async def test_set_light_wraps_composite_value(zuma_api, fake_session):
@@ -267,3 +344,14 @@ def test_push_paths_cover_entity_state(zuma_api):
         "settings:/zuma/circadianLighting",
         "settings:/zuma/ledCurfewEnabled",
     }
+
+
+def test_play_action_resumes_paused_and_replays_stopped(zuma_api):
+    """Paused resumes in place (pause toggles); stopped replays the remembered item."""
+    roles = {"path": "airable:x", "type": "audio"}
+    assert zuma_api.play_action("paused", roles) == "resume"
+    assert zuma_api.play_action("paused", None) == "resume"
+    assert zuma_api.play_action("stopped", roles) == "replay"
+    assert zuma_api.play_action(None, roles) == "replay"
+    assert zuma_api.play_action("stopped", None) is None
+    assert zuma_api.play_action("playing", roles) is None

@@ -17,7 +17,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import VOLUME_MAX
+from .api import ZumaError, play_action
+from .const import AIRABLE_RADIO_ID_PREFIX, VOLUME_MAX
 from .dlna import discover_avtransport, play_url, probe_mime
 from .coordinator import ZumaConfigEntry, ZumaCoordinator
 from .entity import ZumaEntity
@@ -41,12 +42,13 @@ async def async_setup_entry(
 
 
 class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
-    """Volume and mute control for one Zuma unit.
+    """Volume, mute and transport for one Zuma unit.
 
-    Transport is deliberately missing PLAY: the device's control node accepts only
-    pause/stop/next/previous, with no play or resume verb at any spelling. Start
-    playback from the Zuma app, AirPlay, Spotify Connect or TIDAL Connect; this
-    entity then controls it.
+    Playing needs the item, not just a verb: the device takes a play command only
+    with the item's full roles attached. So PLAY resumes the last airable station
+    or podcast seen playing, and play_media starts an airable item by its device
+    id or path. Other sources (AirPlay, Spotify Connect, TIDAL Connect) are
+    started from their apps; this entity then controls them.
     """
 
     _attr_name = None
@@ -74,6 +76,8 @@ class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
         controls.previous, so trust that rather than advertising dead buttons.
         """
         features = self._BASE_FEATURES
+        if self._play_action() is not None:
+            features |= MediaPlayerEntityFeature.PLAY
         controls = self.coordinator.data.get("controls") or {}
         if controls.get("next_"):
             features |= MediaPlayerEntityFeature.NEXT_TRACK
@@ -118,8 +122,27 @@ class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
         source = self.coordinator.data.get("source")
         return {"zuma_service": source} if source else None
 
+    def _play_action(self) -> str | None:
+        return play_action(
+            self.coordinator.data.get("state"), self.coordinator.last_media_roles
+        )
+
+    async def async_media_play(self) -> None:
+        """Resume where a pause left off, or restart the last airable item."""
+        action = self._play_action()
+        if action == "resume":
+            await self._control("pause")  # a toggle: resumes when paused
+        elif action == "replay":
+            await self.coordinator.api.play_roles(self.coordinator.last_media_roles)
+            await self.coordinator.async_request_refresh()
+        else:
+            raise HomeAssistantError("Nothing to resume: start a station first")
+
     async def async_media_pause(self) -> None:
         """Pause. Live streams report `stopped` rather than `paused` afterwards."""
+        # pause toggles, so on an already-paused player it would resume instead.
+        if self.coordinator.data.get("state") == "paused":
+            return
         await self._control("pause")
 
     async def async_media_stop(self) -> None:
@@ -149,13 +172,21 @@ class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
     async def async_play_media(
         self, media_type: str, media_id: str, **kwargs
     ) -> None:
-        """Play a stream URL by bridging to the unit's own DLNA renderer.
+        """Play an airable item natively, or any stream URL via DLNA.
 
-        The nsdk API can't start playback of a URL, but the Rygel renderer on the
-        same box can. Note the renderer only accepts what its sink list allows --
-        MP3 and clean AAC play; ICF/ICY `audio/aacp` streams (e.g. streamtheworld
-        `.aac` mounts) are refused by the device, so use the `.mp3` mount.
+        Airable items are named by the device's own station id
+        (``airable://airable/radio/<id>``) or by an ``airable:`` path whose first row plays; the
+        device looks them up and resolves the stream itself.
+
+        Anything else is a URL: the nsdk API can't play an arbitrary URL, but the
+        Rygel renderer on the same box can. It only accepts what its sink list
+        allows -- MP3 and clean AAC play; ICF/ICY `audio/aacp` streams (e.g.
+        streamtheworld `.aac` mounts) are refused, so use the `.mp3` mount.
         """
+        if media_id.startswith("airable:"):
+            await self._play_airable(media_id)
+            return
+
         if media_source.is_media_source_id(media_id):
             item = await media_source.async_resolve_media(
                 self.hass, media_id, self.entity_id
@@ -183,6 +214,18 @@ class ZumaMediaPlayer(ZumaEntity, MediaPlayerEntity):
             # Port likely rotated; forget it and rediscover once.
             self.coordinator.avtransport_url = None
             await _attempt()
+        await self.coordinator.async_request_refresh()
+
+    async def _play_airable(self, media_id: str) -> None:
+        api = self.coordinator.api
+        try:
+            if media_id.startswith(AIRABLE_RADIO_ID_PREFIX):
+                roles = await api.airable_station_roles(media_id)
+            else:
+                roles = await api.airable_playable_roles(media_id)
+            await api.play_roles(roles)
+        except ZumaError as err:
+            raise HomeAssistantError(f"Cannot play {media_id}: {err}") from err
         await self.coordinator.async_request_refresh()
 
     async def async_set_volume_level(self, volume: float) -> None:

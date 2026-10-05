@@ -18,8 +18,9 @@ over the local network — no cloud, no account, no API key.
 |---|---|---|
 | `light` | `zuma:lightState` | on/off, brightness, colour temperature (2200–6500 K) |
 | `media_player` volume / mute | `player:volume`, `settings:/mediaPlayer/mute` | volume 0–100 ↔ HA 0.0–1.0 |
-| `media_player` transport | `player:player/control` | pause, stop; next/previous only when the stream reports them |
-| `media_player` play URL | DLNA `AVTransport` | `media_player.play_media` — start a stream URL |
+| `media_player` transport | `player:player/control` | pause, stop; next/previous only when the stream reports them; play resumes a pause in place, or restarts the last airable item once stopped |
+| `media_player` play airable | `airable:` → `player:player/control` | `media_player.play_media` with an airable station id — native internet radio |
+| `media_player` play URL | DLNA `AVTransport` | `media_player.play_media` — start any other stream URL |
 | `media_player` now playing | `player:player/data` | state, title, artwork, `zuma_service` attribute |
 | `switch` circadian lighting | `settings:/zuma/circadianLighting` | mode toggle |
 | `switch` status LED curfew | `settings:/zuma/ledCurfewEnabled` | quiets the indicator LED overnight (config) |
@@ -47,9 +48,46 @@ Then **Settings → Devices & Services → Add Integration → Zuma**.
 
 Or copy `custom_components/zuma/` into your HA `config/custom_components/` and restart.
 
-## Playing a stream URL (internet radio, etc.)
+## Playing internet radio (airable)
 
-Use the standard `media_player.play_media` action — no custom service:
+The unit's built-in internet radio is airable. Play a station by the device's own id
+for it with the standard `media_player.play_media` action:
+
+```yaml
+action: media_player.play_media
+target:
+  entity_id: media_player.zuma_bathroom
+data:
+  media_content_id: airable://airable/radio/6495847017504275
+  media_content_type: music
+```
+
+The id is the number at the end of a station's browse path, e.g.
+`airable:https://…airable.io/id/airable/radio/6495847017504275`. Browse for them with
+`scripts/live_check.py <host> --ls airable:` and descend into Radio → Favorites, History
+and so on. An `airable:` browse path works as `media_content_id` too, when the first
+row it lists is playable: a station's path, or a podcast's episodes list (which plays
+its newest episode). A single episode's own `…/id/airable/feed.episode/<id>` path
+can't be listed, so an episode can't be addressed directly.
+
+This is the same dance the Zuma apps do: read the device's airable root (its `path`
+role names an account-specific host such as `https://8779202999.airable.io/` — never
+hardcode it), fetch the station's row under `<root>/id/airable/radio/<id>` with every
+role (`@all`), and hand that row back unchanged as `mediaRoles` in a
+`{"control": "play", "playMode": "normal", "mediaRoles": …}` activate on
+`player:player/control`. The device resolves the stream itself. A bare
+`{"control": "play"}` without roles is what makes the device try to play the current
+directory and fail with *"Directory is empty"*.
+
+**Play** resumes. When paused it sends `pause` again: the verb is a toggle, and resumes
+from the same position (re-sending the item restarts it from the top, and a bare
+`{"control": "play"}` stops playback). Once stopped the device forgets what was
+playing and its position, so the integration keeps the last airable item's roles and
+play re-sends them -- live radio picks up live, a podcast starts over.
+
+## Playing a stream URL
+
+For anything that isn't on airable, use `play_media` with a URL:
 
 ```yaml
 action: media_player.play_media
@@ -60,7 +98,7 @@ data:
   media_content_type: music
 ```
 
-Under the hood the nsdk API can't *start* a URL (only pause/stop/skip), so this bridges
+Under the hood the nsdk API can't play an arbitrary URL, so this bridges
 to the unit's own Rygel DLNA renderer: a unicast SSDP M-SEARCH finds it each call (its
 port is ephemeral and moves across reboots), then `SetAVTransportURI` + `Play`. Volume,
 mute, pause and stop still go through the nsdk API. HA media-source items (TTS, the
@@ -98,12 +136,8 @@ CoAP, no per-device key. Notes that shaped the entity:
 
 ## What isn't possible locally
 
-- **Starting native (airable) internet radio.** Browsing the airable directory works,
-  but nothing in the HTTP API *starts* a station: `player:player/control` accepts only
-  `pause`/`stop`/`next`/`previous` (24 other verb spellings were tried), and activating
-  a station only navigates. Start playback from the Zuma app / AirPlay / Spotify /
-  TIDAL and this integration then controls it — or push any stream URL yourself with
-  `play_media` (above), which is the practical substitute.
+- **Starting AirPlay, Spotify Connect or TIDAL Connect.** These are driven from the
+  sending app; start them there and this integration then controls them.
 - **Numeric device temperature.** The unit measures SoC / MCU / LED / amp temperatures
   (`zuma-metric-gatherer` reading `/sys/class/thermal/...`) but **publishes them only as
   MQTT telemetry to Zuma's cloud** — they are never written to a locally-readable node.

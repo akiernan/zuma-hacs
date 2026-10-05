@@ -64,16 +64,21 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Records POSTed bodies and replays one canned reply."""
+    """Records POSTed bodies and replays a canned reply.
 
-    def __init__(self, reply: str = "true", status: int = 200) -> None:
+    Pass a list of replies to answer successive requests in turn.
+    """
+
+    def __init__(self, reply: str | list[str] = "true", status: int = 200) -> None:
+        self.replies = reply if isinstance(reply, list) else None
         self.reply = reply
         self.status = status
         self.calls: list[tuple[str, dict | None]] = []
 
     def post(self, url, json=None, timeout=None):
         self.calls.append((url, json))
-        return FakeResponse(self.reply, self.status)
+        reply = self.replies.pop(0) if self.replies is not None else self.reply
+        return FakeResponse(reply, self.status)
 
 
 @pytest.fixture
