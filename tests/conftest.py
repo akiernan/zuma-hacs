@@ -9,6 +9,7 @@ able to poke a real device from a laptop.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 import sys
@@ -54,6 +55,8 @@ class FakeResponse:
         self.status = status
 
     async def text(self) -> str:
+        # Yield like real I/O, so concurrent callers interleave as they would.
+        await asyncio.sleep(0)
         return self._text
 
     async def __aenter__(self) -> FakeResponse:

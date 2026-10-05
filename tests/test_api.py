@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import sys
 
 import pytest
@@ -60,7 +61,22 @@ def test_roundtrip_wrap_unwrap(zuma_api):
         assert zuma_api.unwrap({"value": zuma_api.wrap(value)}) == value
 
 
-async def test_set_volume_clamps_to_device_range(zuma_api, fake_session):
+@pytest.fixture
+def no_volume_verify(zuma_api, monkeypatch):
+    """Leave out the read-back, for tests that count the writes themselves."""
+
+    async def skip(self, seq):
+        return None
+
+    monkeypatch.setattr(zuma_api.ZumaApi, "_verify_volume", skip)
+
+
+@pytest.fixture
+def no_volume_spacing(zuma_api, monkeypatch, no_volume_verify):
+    monkeypatch.setattr(zuma_api, "VOLUME_WRITE_SPACING", 0)
+
+
+async def test_set_volume_clamps_to_device_range(zuma_api, fake_session, no_volume_spacing):
     """Out-of-range volumes are clamped, not sent through and rejected."""
     session = fake_session()
     api = zuma_api.ZumaApi("host.invalid", session)
@@ -71,6 +87,81 @@ async def test_set_volume_clamps_to_device_range(zuma_api, fake_session):
 
     sent = [body["value"]["i32_"] for _, body in session.calls]
     assert sent == [100, 0, 35]
+
+
+async def test_set_volume_newest_wins(zuma_api, fake_session, no_volume_spacing):
+    """A burst sends the first value and the last; the ones in between are skipped."""
+    session = fake_session("true")
+    api = zuma_api.ZumaApi("host.invalid", session)
+    await asyncio.gather(*(api.set_volume(v) for v in (52, 54, 56, 58)))
+    assert [body["value"]["i32_"] for _, body in session.calls] == [52, 58]
+
+
+async def test_set_volume_spaces_writes(zuma_api, fake_session, monkeypatch, no_volume_verify):
+    """Consecutive writes are held apart so the device doesn't drop the second."""
+    monkeypatch.setattr(zuma_api, "VOLUME_WRITE_SPACING", 0.05)
+    session = fake_session("true")
+    api = zuma_api.ZumaApi("host.invalid", session)
+    loop = asyncio.get_running_loop()
+    times = []
+    real_post = session.post
+
+    def timed_post(*args, **kwargs):
+        times.append(loop.time())
+        return real_post(*args, **kwargs)
+
+    session.post = timed_post
+    await api.set_volume(40)
+    await api.set_volume(42)
+    assert len(times) == 2
+    assert times[1] - times[0] >= 0.05
+
+
+VOLUME_50 = '{"value": {"type": "i32_", "i32_": 50}}'
+VOLUME_52 = '{"value": {"type": "i32_", "i32_": 52}}'
+
+
+@pytest.fixture
+def fast_volume(zuma_api, monkeypatch):
+    monkeypatch.setattr(zuma_api, "VOLUME_WRITE_SPACING", 0)
+    monkeypatch.setattr(zuma_api, "VOLUME_VERIFY_DELAY", 0)
+
+
+async def test_set_volume_resends_a_dropped_write(zuma_api, fake_session, fast_volume):
+    """If the read-back shows the write didn't take, it is sent once more."""
+    session = fake_session(["true", VOLUME_50, "true"])
+    api = zuma_api.ZumaApi("host.invalid", session)
+    await api.set_volume(52)
+    await api._volume_verify
+    assert [(url.rsplit("/", 1)[1], body.get("value")) for url, body in session.calls] == [
+        ("setData", {"type": "i32_", "i32_": 52}),
+        ("getData", None),
+        ("setData", {"type": "i32_", "i32_": 52}),
+    ]
+
+
+async def test_set_volume_no_resend_when_it_took(zuma_api, fake_session, fast_volume):
+    session = fake_session(["true", VOLUME_52])
+    api = zuma_api.ZumaApi("host.invalid", session)
+    await api.set_volume(52)
+    await api._volume_verify
+    assert len(session.calls) == 2
+
+
+async def test_set_volume_newer_value_abandons_check(zuma_api, fake_session, monkeypatch):
+    """Only the last value of a burst is checked; earlier checks are cancelled."""
+    monkeypatch.setattr(zuma_api, "VOLUME_WRITE_SPACING", 0)
+    monkeypatch.setattr(zuma_api, "VOLUME_VERIFY_DELAY", 0.05)
+    session = fake_session(["true", "true", VOLUME_52])
+    api = zuma_api.ZumaApi("host.invalid", session)
+    await api.set_volume(50)
+    first = api._volume_verify
+    await api.set_volume(52)
+    await api._volume_verify
+    assert first.cancelled()
+    assert [url.rsplit("/", 1)[1] for url, _ in session.calls] == [
+        "setData", "setData", "getData",
+    ]
 
 
 async def test_get_volume_unwraps(zuma_api, fake_session):

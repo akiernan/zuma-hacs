@@ -24,6 +24,7 @@ Two quirks drive the code below:
 from __future__ import annotations
 
 from collections.abc import Callable
+import asyncio
 import json
 import logging
 from collections.abc import Sequence
@@ -57,6 +58,17 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# The device can silently drop a volume write that lands right on the heels of
+# another (both get HTTP 200; the second never takes). How often varies by unit and
+# its state: one Zuma SL lost 30 of 30 back-to-back pairs, another 0 of 30. Spacing
+# fixes most of it: on the lossy unit, slider-style bursts spaced 0.15 s still needed
+# a resend in 5 of 40, while at 0.3 s none of 40 did.
+VOLUME_WRITE_SPACING = 0.3
+# Spacing makes a drop rare but can't undo one -- say, a write from another app
+# landing just ahead of ours. So once a burst of writes settles, the volume is
+# read back after this long and, if the last value didn't take, written once more.
+VOLUME_VERIFY_DELAY = 1.0
 
 
 class ZumaError(Exception):
@@ -198,6 +210,11 @@ class ZumaApi:
         self._host = host
         self._session = session
         self._airable_root: str | None = None
+        self._volume_lock = asyncio.Lock()
+        self._volume_target = 0
+        self._volume_seq = 0
+        self._volume_last_write = float("-inf")
+        self._volume_verify: asyncio.Task[None] | None = None
         self._timeout = aiohttp.ClientTimeout(total=timeout)
 
     @property
@@ -281,8 +298,60 @@ class ZumaApi:
         return await self.get_value(PATH_VOLUME)
 
     async def set_volume(self, volume: int) -> None:
-        """Set volume, clamped to the device's 0-100 range."""
-        await self.set_value(PATH_VOLUME, max(0, min(VOLUME_MAX, int(volume))))
+        """Set volume, clamped to the device's 0-100 range.
+
+        Writes go out one at a time, spaced VOLUME_WRITE_SPACING apart, and the
+        newest request wins: a caller that has been overtaken while waiting
+        returns without writing, since a later value is about to be sent. A
+        slider dragged through 52, 54, 56 thus sends 52 then 56, and the device
+        lands on 56 instead of dropping a write and stopping short.
+
+        After the last write of a burst, a background check reads the volume
+        back and resends it once if it didn't take (see _verify_volume).
+        """
+        self._volume_target = max(0, min(VOLUME_MAX, int(volume)))
+        self._volume_seq += 1
+        mine = self._volume_seq
+        if self._volume_verify is not None:
+            self._volume_verify.cancel()  # a newer value supersedes the old check
+        if await self._write_volume(mine):
+            self._volume_verify = asyncio.create_task(self._verify_volume(mine))
+
+    async def _write_volume(self, seq: int) -> bool:
+        """Write the current target, spaced from the last write, unless overtaken."""
+        async with self._volume_lock:
+            loop = asyncio.get_running_loop()
+            delay = self._volume_last_write + VOLUME_WRITE_SPACING - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            if seq != self._volume_seq:
+                return False  # overtaken; the newest caller writes the newest value
+            try:
+                await self.set_value(PATH_VOLUME, self._volume_target)
+            finally:
+                self._volume_last_write = loop.time()
+            return True
+
+    async def _verify_volume(self, seq: int) -> None:
+        """Once a burst settles, read the volume back; resend once if it was dropped.
+
+        Abandoned if a newer value is requested meanwhile. A read failure is let
+        go: the regular poll will show whatever the device has.
+        """
+        await asyncio.sleep(VOLUME_VERIFY_DELAY)
+        if seq != self._volume_seq:
+            return
+        try:
+            actual = await self.get_volume()
+        except ZumaError:
+            return
+        if seq != self._volume_seq or actual == self._volume_target:
+            return
+        _LOGGER.debug("volume %s didn't take (device has %s); resending", self._volume_target, actual)
+        try:
+            await self._write_volume(seq)
+        except ZumaError as err:
+            _LOGGER.debug("volume resend failed: %s", err)
 
     async def get_mute(self) -> bool | None:
         """Current mute flag."""
