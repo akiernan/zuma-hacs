@@ -7,7 +7,7 @@
   "config_flow": true,
   "documentation": "https://github.com/luismalves/zuma-hacs",
   "integration_type": "device",
-  "iot_class": "local_polling",
+  "iot_class": "local_push",
   "issue_tracker": "https://github.com/luismalves/zuma-hacs/issues",
   "requirements": [],
   "version": "0.1.2",
