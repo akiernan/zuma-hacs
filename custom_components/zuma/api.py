@@ -512,6 +512,24 @@ class ZumaApi:
             },
         )
 
+    async def patch_light(self, fields: dict[str, Any]) -> Any:
+        """Change only the given zumaLightState fields; the rest stay as they are.
+
+        Activating the light node with a partial zumaLightState applies it as a
+        patch, where a value write (set_light) replaces the whole state. So
+        nothing stale is written back: a power-only patch sets power (it is not
+        a toggle) and leaves brightness and temperature alone. Without a
+        lastTransitionPeriod the device uses its default for the change.
+        """
+        return await self._request(
+            "setData",
+            {
+                "path": PATH_LIGHT,
+                "role": "activate",
+                "value": {"type": "zumaLightState", "zumaLightState": fields},
+            },
+        )
+
     async def get_identity(self) -> dict[str, Any]:
         """Identity for the config flow and device registry.
 

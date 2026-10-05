@@ -128,3 +128,22 @@ async def test_diagnostics_present(api):
     assert st["rssi"] is None or isinstance(st["rssi"], int | float)
     assert st["thermal"] in (None, "normal", "ledLimited", "ledAmpLimited", "ledAmpShutdown")
     assert isinstance(st["master"], bool)
+
+
+@pytest.mark.skipif(not ALLOW_WRITE, reason="set ZUMA_ALLOW_WRITE=1 to test writes")
+async def test_light_patch_changes_only_given_fields(api):
+    """A power-only patch sets power and nothing else -- switches a real lamp, then back."""
+    orig = await api.get_light()
+    try:
+        await api.patch_light({"power": not orig["power"]})
+        patched = await api.get_light()
+        print(f"\npatch: power {orig['power']} -> {patched['power']}")
+        assert patched["power"] is not orig["power"]
+        assert patched["brightness"] == orig["brightness"]
+        assert patched["temperature"] == orig["temperature"]
+        # A patch sets rather than toggles: repeating it changes nothing.
+        await api.patch_light({"power": not orig["power"]})
+        assert (await api.get_light())["power"] is not orig["power"]
+    finally:
+        await api.patch_light({"power": orig["power"]})
+        assert (await api.get_light())["power"] is orig["power"]

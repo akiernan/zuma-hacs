@@ -47,8 +47,8 @@ PATH_VOLUME_MAP = "settings:/mediaPlayer/volumeMap"
 PATH_LIGHT = "zuma:lightState"
 
 # Firmware tolerates 1000-8000 K but that is outside useful tunable white; clamp to
-# the range a real fixture renders. Brightness and power are independent on the
-# device (brightness 0 keeps power true), so turn-off toggles power, not brightness.
+# the range a real fixture renders. Brightness 0 keeps power true, so turn-off sets
+# power, not brightness; but a non-zero brightness switches the lamp on.
 LIGHT_MIN_KELVIN = 2200
 LIGHT_MAX_KELVIN = 6500
 

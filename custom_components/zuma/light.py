@@ -20,10 +20,8 @@ from .coordinator import ZumaConfigEntry, ZumaCoordinator
 from .entity import ZumaEntity
 
 
-def _nearest_transition(seconds: float | None) -> str:
+def _nearest_transition(seconds: float) -> str:
     """Map HA's transition (seconds) to the device's fixed millisecond buckets."""
-    if seconds is None:
-        return "ms500"
     ms = seconds * 1000
     return LIGHT_TRANSITIONS[min(LIGHT_TRANSITIONS, key=lambda b: abs(b - ms))]
 
@@ -40,9 +38,10 @@ async def async_setup_entry(
 class ZumaLight(ZumaEntity, LightEntity):
     """Brightness + colour temperature for one Zuma unit.
 
-    power and brightness are independent on the device (brightness 0 leaves the lamp
-    powered), so on/off toggles the `power` field and leaves brightness untouched --
-    that way the lamp comes back at the level it had.
+    power is its own field: brightness 0 leaves the lamp powered (on but dark), so
+    on/off sets `power` and leaves brightness untouched -- that way the lamp comes
+    back at the level it had. It only goes one way, though: setting a non-zero
+    brightness switches the lamp on.
     """
 
     _attr_name = None
@@ -67,7 +66,7 @@ class ZumaLight(ZumaEntity, LightEntity):
 
     @property
     def is_on(self) -> bool | None:
-        """Power flag, independent of brightness."""
+        """Power flag; brightness 0 can still read as on."""
         return self._light.get("power")
 
     @property
@@ -83,39 +82,39 @@ class ZumaLight(ZumaEntity, LightEntity):
 
     async def async_turn_on(self, **kwargs: Any) -> None:
         """Power on, applying any brightness / colour-temp / transition given."""
-        state = dict(self._light)
-        state["power"] = True
+        changes: dict[str, Any] = {}
         if ATTR_BRIGHTNESS in kwargs:
-            state["brightness"] = round(kwargs[ATTR_BRIGHTNESS] * 100 / 255)
+            changes["brightness"] = round(kwargs[ATTR_BRIGHTNESS] * 100 / 255)
         if ATTR_COLOR_TEMP_KELVIN in kwargs:
             # Clamp to the advertised range; the device tolerates more but renders poorly.
-            state["temperature"] = max(
+            changes["temperature"] = max(
                 LIGHT_MIN_KELVIN, min(LIGHT_MAX_KELVIN, kwargs[ATTR_COLOR_TEMP_KELVIN])
             )
-        state["lastTransitionPeriod"] = _nearest_transition(kwargs.get(ATTR_TRANSITION))
-        await self._write(state)
+        await self._set(True, changes, kwargs.get(ATTR_TRANSITION))
 
     async def async_turn_off(self, **kwargs: Any) -> None:
         """Power off, keeping brightness so it restores on next turn-on."""
-        state = dict(self._light)
-        state["power"] = False
-        state["lastTransitionPeriod"] = _nearest_transition(kwargs.get(ATTR_TRANSITION))
-        await self._write(state)
+        await self._set(False, {}, kwargs.get(ATTR_TRANSITION))
 
-    async def _write(self, state: dict[str, Any]) -> None:
-        # Send only the four fields the device expects; drop anything stray we read.
-        payload = {
-            "power": state.get("power", True),
-            "brightness": state.get("brightness", 100),
-            "temperature": state.get("temperature", 4600),
-            "lastTransitionPeriod": state.get("lastTransitionPeriod", "ms500"),
-        }
-        await self.coordinator.api.set_light(payload)
+    async def _set(
+        self, power: bool, changes: dict[str, Any], transition: float | None
+    ) -> None:
+        """Send power plus only the fields being changed, as a patch.
+
+        Nothing read from the cache goes back to the device, so a brightness or
+        colour change made from the app since the last update is kept, not
+        reverted. With no transition the device uses its own default.
+        """
+        patch = {"power": power, **changes}
+        if transition is not None:
+            patch["lastTransitionPeriod"] = _nearest_transition(transition)
+        await self.coordinator.api.patch_light(patch)
+        state = {**self._light, **patch}
         # Reflect the commanded state at once, optimistically. The lamp fades over
         # lastTransitionPeriod and reports the *old* power/brightness until the fade
         # settles, so an immediate read-back flickers (e.g. off -> on -> off on
         # turn-off). Trust the command we just made and let the push event / poll
         # reconcile once the device settles.
         data = dict(self.coordinator.data or {})
-        data["light"] = payload
+        data["light"] = state
         self.coordinator.async_set_updated_data(data)

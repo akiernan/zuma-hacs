@@ -358,6 +358,20 @@ async def test_set_light_wraps_composite_value(zuma_api, fake_session):
     assert body["value"]["zumaLightState"]["brightness"] == 40
 
 
+async def test_patch_light_sends_only_given_fields(zuma_api, fake_session):
+    """A patch is an activate on the light node carrying just the changed fields."""
+    session = fake_session("{}")
+    api = zuma_api.ZumaApi("host.invalid", session)
+    await api.patch_light({"power": False})
+    url, body = session.calls[0]
+    assert url.endswith("/api/setData")
+    assert body == {
+        "path": "zuma:lightState",
+        "role": "activate",
+        "value": {"type": "zumaLightState", "zumaLightState": {"power": False}},
+    }
+
+
 async def test_get_light_unwraps_state(zuma_api, fake_session):
     reply = '{"value":{"type":"zumaLightState","zumaLightState":{"power":true,"brightness":17,"temperature":3869}}}'
     api = zuma_api.ZumaApi("host.invalid", fake_session(reply))

@@ -128,9 +128,16 @@ CoAP, no per-device key. Notes that shaped the entity:
 
 - **Colour temperature**: the firmware tolerates 1000–8000 K but the entity clamps to
   2200–6500 K, the range a fixture actually renders.
-- **Brightness and power are independent** — `brightness: 0` leaves `power: true` (on
-  but dark), so turn-off writes `power: false` and keeps the brightness, restoring the
-  level on turn-on.
+- **Power is its own field, but not fully independent** — `brightness: 0` leaves
+  `power: true` (on but dark), so turn-off switches power and keeps the brightness,
+  restoring the level on turn-on. The other way round doesn't hold: setting a non-zero
+  brightness switches the lamp on.
+- **Changes are patches.** Activating `zuma:lightState` (rather than writing its
+  `value`) with a partial `zumaLightState` changes only the fields given, e.g.
+  `{"type": "zumaLightState", "zumaLightState": {"power": false}}`. So the entity
+  sends just power plus whatever was asked for, and never writes back stale fields
+  over a change made from the app. Without a `lastTransitionPeriod` the device uses
+  its default.
 - **Transition** enum: `instant, ms125, ms250, ms500, ms1000, ms2000, ms4000`; HA's
   transition seconds snap to the nearest bucket.
 
