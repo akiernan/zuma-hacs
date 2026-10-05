@@ -14,6 +14,18 @@ def test_unwrap_tagged_scalars(zuma_api):
     assert zuma_api.unwrap({"value": {"string_": "Bathroom", "type": "string_"}}) == "Bathroom"
 
 
+def test_unwrap_bool_strings(zuma_api):
+    """The device may send a bool_ as "0"/"1"; "0" must not read as true."""
+    assert zuma_api.unwrap({"value": {"bool_": "0", "type": "bool_"}}) is False
+    assert zuma_api.unwrap({"value": {"bool_": "1", "type": "bool_"}}) is True
+    assert zuma_api.unwrap_item({"bool_": "0", "type": "bool_"}) is False
+    # Anything else is unknown rather than truthy.
+    assert zuma_api.unwrap({"value": {"bool_": "yes", "type": "bool_"}}) is None
+    assert zuma_api.unwrap({"value": {"bool_": 1, "type": "bool_"}}) is None
+    # Strings under other tags are left alone.
+    assert zuma_api.unwrap({"value": {"string_": "0", "type": "string_"}}) == "0"
+
+
 def test_unwrap_picks_role(zuma_api):
     """A structure reply is keyed by role; unwrap reads the one asked for."""
     reply = {"title": "Volume", "type": "value", "value": {"type": "i32_", "i32_": 50}}

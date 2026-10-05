@@ -79,7 +79,22 @@ def unwrap_item(item: Any) -> Any:
     if not isinstance(item, dict):
         return item
     tag = item.get("type")
-    return item.get(tag) if tag else item
+    if not tag:
+        return item
+    value = item.get(tag)
+    if tag == "bool_" and not isinstance(value, bool):
+        return _lax_bool(value)
+    return value
+
+
+# The device doesn't enforce types: a bool_ may arrive as the string "0" or "1",
+# and a non-empty string is truthy, so taken as-is "0" would read as on.
+_BOOL_STRINGS = {"0": False, "1": True}
+
+
+def _lax_bool(value: Any) -> bool | None:
+    """A bool_ payload that isn't a JSON boolean; None if it isn't "0"/"1" either."""
+    return _BOOL_STRINGS.get(value) if isinstance(value, str) else None
 
 
 def wrap(value: bool | int | str) -> dict[str, Any]:
