@@ -1,24 +1,31 @@
 """Async client for the StreamUnlimited StreamSDK HTTP API exposed by Zuma devices.
 
-Reverse-engineered surface (port 80, plaintext, no authentication):
+Surface (port 80, plaintext, no authentication), every call a JSON POST, as the
+official nSDK bindings make them:
 
-    GET  /api/getData?path=<p>&roles=<comma,separated>
-    GET  /api/getRows?path=<p>&roles=<r>&from=<i>&to=<i>
-    POST /api/setData   {"path":..,"role":..,"value":..}
-    GET  /api/event/modifyQueue?queueId=&subscribe=[..]&unsubscribe=[..]
-    GET  /api/event/pollQueue?queueId=&timeout=<ms>
+    POST /api/getData            {"path", "roles": [..], "type": "structure"}
+    POST /api/getRows            {"path", "roles": [..], "from", "to", "type": "structure"}
+    POST /api/setData            {"path", "role", "value"}
+    POST /api/event/modifyQueue  {"queueId"?, "subscribe": [..], "unsubscribe": [..]}
+    POST /api/event/pollQueue    {"queueId", "timeout"}
+
+``"type": "structure"`` makes getData answer with an object keyed by role name
+(``{"value": ..., "title": ...}``) and getRows with one such object per row,
+rather than arrays that must be matched to the requested roles by position.
 
 Two quirks drive the code below:
   * Values are tagged unions -- {"i32_": 22, "type": "i32_"} -- so reads must be
     unwrapped and writes must be re-tagged with the matching type name.
-  * Application-level errors arrive as HTTP 500 with a JSON {"error": {...}} body
-    rather than as a transport failure, so status codes alone are not enough.
+  * Application-level errors arrive as a non-2xx status (usually 500) with a JSON
+    {"error": {...}} body; other failures (e.g. "Unknown queue id!", 400) are bare
+    text. Either way the status, not the body, decides.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from typing import Any
 
 import aiohttp
@@ -51,20 +58,23 @@ class ZumaError(Exception):
     """The device replied, but with an application-level error."""
 
 
-def unwrap(raw: Any) -> Any:
-    """Turn a getData reply into a plain Python value.
-
-    getData always answers with a list, one entry per requested role. A scalar
-    leaf is tagged (``{"i32_": 22, "type": "i32_"}``); a composite node such as
-    ``player:player/data`` is a plain untagged dict and is returned as-is.
-    """
-    if not isinstance(raw, list) or not raw:
+def unwrap(reply: Any, role: str = "value") -> Any:
+    """Turn a getData reply into the plain Python value of one role."""
+    if not isinstance(reply, dict):
         return None
-    first = raw[0]
-    if not isinstance(first, dict):
-        return first
-    tag = first.get("type")
-    return first.get(tag) if tag else first
+    return unwrap_item(reply.get(role))
+
+
+def unwrap_item(item: Any) -> Any:
+    """Unwrap one tagged value.
+
+    A scalar leaf is tagged (``{"i32_": 22, "type": "i32_"}``); a composite node
+    such as ``player:player/data`` is a plain untagged dict and is returned as-is.
+    """
+    if not isinstance(item, dict):
+        return item
+    tag = item.get("type")
+    return item.get(tag) if tag else item
 
 
 def wrap(value: bool | int | str) -> dict[str, Any]:
@@ -98,61 +108,71 @@ class ZumaApi:
     async def _request(
         self,
         endpoint: str,
+        body: dict[str, Any],
         *,
-        params: dict[str, Any] | None = None,
-        body: dict[str, Any] | None = None,
         timeout: aiohttp.ClientTimeout | None = None,
     ) -> Any:
         url = f"http://{self._host}/api/{endpoint}"
-        # aiohttp rejects non-string query values, and the device wants ints as digits.
-        query = {k: str(v) for k, v in (params or {}).items()}
-        timeout = timeout or self._timeout
         try:
-            if body is None:
-                ctx = self._session.get(url, params=query, timeout=timeout)
-            else:
-                ctx = self._session.post(url, json=body, timeout=timeout)
-            async with ctx as resp:
+            async with self._session.post(
+                url, json=body, timeout=timeout or self._timeout
+            ) as resp:
+                status = resp.status
                 text = await resp.text()
         except aiohttp.ClientError as err:
             raise ZumaError(f"cannot reach {self._host}: {err}") from err
 
-        if not text:
-            return {}
         try:
-            data = json.loads(text)
-        except ValueError as err:
-            raise ZumaError(f"non-JSON reply from {endpoint}: {text[:120]}") from err
+            data = json.loads(text) if text else None
+        except ValueError:
+            data = None
+            if 200 <= status < 300:
+                raise ZumaError(f"non-JSON reply from {endpoint}: {text[:120]}") from None
 
-        if isinstance(data, dict) and data.get("error"):
-            raise ZumaError(str(data["error"].get("message", data["error"])))
+        if not 200 <= status < 300:
+            if isinstance(data, dict) and isinstance(data.get("error"), dict):
+                raise ZumaError(str(data["error"].get("message", data["error"])))
+            raise ZumaError(f"HTTP {status} from {endpoint}: {text[:120]}")
         return data
 
     # --- primitives -------------------------------------------------------
 
-    async def get_data(self, path: str, roles: str = "value") -> Any:
-        """Raw getData, one entry per requested role."""
-        return await self._request("getData", params={"path": path, "roles": roles})
+    async def get_data(self, path: str, roles: Sequence[str] = ("value",)) -> Any:
+        """Raw getData: an object keyed by role name, values still tagged."""
+        return await self._request(
+            "getData", {"path": path, "roles": list(roles), "type": "structure"}
+        )
 
     async def get_value(self, path: str) -> Any:
         """getData for the ``value`` role, unwrapped."""
-        return unwrap(await self.get_data(path, "value"))
+        return unwrap(await self.get_data(path))
 
     async def set_value(self, path: str, value: bool | int | str) -> Any:
         """setData on the ``value`` role."""
         return await self._request(
-            "setData", body={"path": path, "role": "value", "value": wrap(value)}
+            "setData", {"path": path, "role": "value", "value": wrap(value)}
         )
 
     async def get_rows(
-        self, path: str, roles: str = "path,type", start: int = 0, end: int = 200
-    ) -> list[list[Any]]:
-        """List a container node's children."""
+        self,
+        path: str,
+        roles: Sequence[str] = ("path", "type"),
+        start: int = 0,
+        end: int = 200,
+    ) -> list[dict[str, Any]]:
+        """List a container node's children, one role-keyed object per row."""
         reply = await self._request(
             "getRows",
-            params={"path": path, "roles": roles, "from": start, "to": end},
+            {
+                "path": path,
+                "roles": list(roles),
+                "from": start,
+                "to": end,
+                "type": "structure",
+            },
         )
-        return [row for row in (reply.get("rows") or []) if row and row[0]]
+        rows = reply.get("rows") if isinstance(reply, dict) else None
+        return [row for row in rows or [] if isinstance(row, dict) and row]
 
     # --- conveniences -----------------------------------------------------
 
@@ -183,7 +203,7 @@ class ZumaApi:
         if verb not in CONTROL_VERBS:
             raise ValueError(f"unknown control verb {verb!r}; have {CONTROL_VERBS}")
         return await self._request(
-            "setData", body={"path": PATH_CONTROL, "role": "activate", "value": {"control": verb}}
+            "setData", {"path": PATH_CONTROL, "role": "activate", "value": {"control": verb}}
         )
 
     async def get_player_state(self) -> str | None:
@@ -200,10 +220,9 @@ class ZumaApi:
         the device then pushes ``{"itemType": "update", "path": ...}`` when one
         changes. Returns the queue id (a brace-wrapped UUID) to poll.
         """
-        subscribe = json.dumps([{"path": p, "type": "item"} for p in paths])
         qid = await self._request(
             "event/modifyQueue",
-            params={"queueId": "", "subscribe": subscribe, "unsubscribe": "[]"},
+            {"subscribe": [{"path": p, "type": "item"} for p in paths]},
         )
         if not isinstance(qid, str):
             raise ZumaError(f"unexpected modifyQueue reply: {qid!r}")
@@ -215,11 +234,11 @@ class ZumaApi:
         The device holds the connection until a subscribed node changes (it does
         not honour the ``timeout`` param as an idle return), so ``client_timeout``
         is the liveness ceiling: on expiry the caller simply re-polls. A stale
-        queue id yields a non-JSON "Unknown queue id!" body, surfaced as ZumaError.
+        queue id yields HTTP 400 "Unknown queue id!", surfaced as ZumaError.
         """
         events = await self._request(
             "event/pollQueue",
-            params={"queueId": queue_id, "timeout": 30000},
+            {"queueId": queue_id, "timeout": 30000},
             timeout=aiohttp.ClientTimeout(total=client_timeout),
         )
         if not isinstance(events, list):
@@ -238,7 +257,7 @@ class ZumaApi:
         """
         return await self._request(
             "setData",
-            body={
+            {
                 "path": PATH_LIGHT,
                 "role": "value",
                 "value": {"type": "zumaLightState", "zumaLightState": state},

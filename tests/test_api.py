@@ -7,21 +7,29 @@ import pytest
 
 def test_unwrap_tagged_scalars(zuma_api):
     """A tagged leaf yields the bare Python value."""
-    assert zuma_api.unwrap([{"i32_": 22, "type": "i32_"}]) == 22
-    assert zuma_api.unwrap([{"bool_": False, "type": "bool_"}]) is False
-    assert zuma_api.unwrap([{"string_": "Bathroom", "type": "string_"}]) == "Bathroom"
+    assert zuma_api.unwrap({"value": {"i32_": 22, "type": "i32_"}}) == 22
+    assert zuma_api.unwrap({"value": {"bool_": False, "type": "bool_"}}) is False
+    assert zuma_api.unwrap({"value": {"string_": "Bathroom", "type": "string_"}}) == "Bathroom"
+
+
+def test_unwrap_picks_role(zuma_api):
+    """A structure reply is keyed by role; unwrap reads the one asked for."""
+    reply = {"title": "Volume", "type": "value", "value": {"type": "i32_", "i32_": 50}}
+    assert zuma_api.unwrap(reply) == 50
+    assert zuma_api.unwrap(reply, "title") == "Volume"
 
 
 def test_unwrap_untagged_composite(zuma_api):
     """player:player/data comes back untagged and must survive intact."""
-    raw = [{"state": "stopped", "keepActive": False, "error": ""}]
-    assert zuma_api.unwrap(raw) == raw[0]
+    data = {"state": "stopped", "keepActive": False, "error": ""}
+    assert zuma_api.unwrap({"value": data}) == data
 
 
 def test_unwrap_handles_empty_and_garbage(zuma_api):
-    assert zuma_api.unwrap([]) is None
-    assert zuma_api.unwrap([None]) is None
-    assert zuma_api.unwrap({"not": "a list"}) is None
+    assert zuma_api.unwrap({}) is None
+    assert zuma_api.unwrap({"value": None}) is None
+    assert zuma_api.unwrap(None) is None
+    assert zuma_api.unwrap([{"i32_": 1, "type": "i32_"}]) is None
 
 
 def test_wrap_tags_bool_before_int(zuma_api):
@@ -35,7 +43,7 @@ def test_wrap_tags_bool_before_int(zuma_api):
 
 def test_roundtrip_wrap_unwrap(zuma_api):
     for value in (0, 22, 100, True, False, "Bathroom"):
-        assert zuma_api.unwrap([zuma_api.wrap(value)]) == value
+        assert zuma_api.unwrap({"value": zuma_api.wrap(value)}) == value
 
 
 async def test_set_volume_clamps_to_device_range(zuma_api, fake_session):
@@ -47,34 +55,63 @@ async def test_set_volume_clamps_to_device_range(zuma_api, fake_session):
     await api.set_volume(-10)
     await api.set_volume(35)
 
-    sent = [call[2]["value"]["i32_"] for call in session.calls]
+    sent = [body["value"]["i32_"] for _, body in session.calls]
     assert sent == [100, 0, 35]
 
 
 async def test_get_volume_unwraps(zuma_api, fake_session):
-    api = zuma_api.ZumaApi("host.invalid", fake_session('[{"i32_": 22, "type": "i32_"}]'))
+    session = fake_session('{"value": {"i32_": 22, "type": "i32_"}}')
+    api = zuma_api.ZumaApi("host.invalid", session)
     assert await api.get_volume() == 22
+    url, body = session.calls[0]
+    assert url.endswith("/api/getData")
+    assert body == {"path": "player:volume", "roles": ["value"], "type": "structure"}
 
 
 async def test_application_error_raises(zuma_api, fake_session):
     """A 500-with-JSON-body error must surface as ZumaError, not pass silently."""
-    session = fake_session('{"error": {"name": "x", "message": "Node does not exist"}}')
+    session = fake_session(
+        '{"error": {"name": "x", "message": "Node does not exist"}}', status=500
+    )
     api = zuma_api.ZumaApi("host.invalid", session)
     with pytest.raises(zuma_api.ZumaError, match="Node does not exist"):
         await api.get_volume()
 
 
-async def test_query_values_are_stringified(zuma_api, fake_session):
-    """aiohttp rejects int query values, so getRows must stringify from/to."""
-    session = fake_session('{"rows": []}')
+async def test_non_json_error_raises_with_status(zuma_api, fake_session):
+    """A bare-text failure (e.g. a stale queue id) is an error by status alone."""
+    api = zuma_api.ZumaApi("host.invalid", fake_session("Unknown queue id!", status=400))
+    with pytest.raises(zuma_api.ZumaError, match="HTTP 400.*Unknown queue id"):
+        await api.poll_events("{stale}")
+
+
+async def test_non_json_success_raises(zuma_api, fake_session):
+    api = zuma_api.ZumaApi("host.invalid", fake_session("<html>", status=200))
+    with pytest.raises(zuma_api.ZumaError, match="non-JSON"):
+        await api.get_volume()
+
+
+async def test_get_rows_requests_structure(zuma_api, fake_session):
+    """getRows asks for structure rows and returns them keyed by role."""
+    session = fake_session(
+        '{"rowsVersion": 0, "rowsCount": 2, "rows": ['
+        '{"type": "value", "path": "settings:/zuma/bezelAttached"},'
+        '{"type": "container", "path": "settings:/zuma/avs"}]}'
+    )
     api = zuma_api.ZumaApi("host.invalid", session)
-    await api.get_rows("settings:/", start=0, end=45)
-    _, _, params = session.calls[0]
-    assert params == {
-        "path": "settings:/",
-        "roles": "path,type",
-        "from": "0",
-        "to": "45",
+    rows = await api.get_rows("settings:/zuma", start=0, end=45)
+    assert rows == [
+        {"type": "value", "path": "settings:/zuma/bezelAttached"},
+        {"type": "container", "path": "settings:/zuma/avs"},
+    ]
+    url, body = session.calls[0]
+    assert url.endswith("/api/getRows")
+    assert body == {
+        "path": "settings:/zuma",
+        "roles": ["path", "type"],
+        "from": 0,
+        "to": 45,
+        "type": "structure",
     }
 
 
@@ -83,7 +120,7 @@ async def test_control_sends_expected_payload(zuma_api, fake_session):
     session = fake_session("null")
     api = zuma_api.ZumaApi("host.invalid", session)
     await api.control("pause")
-    _, url, body = session.calls[0]
+    url, body = session.calls[0]
     assert url.endswith("/api/setData")
     assert body == {
         "path": "player:player/control",
@@ -107,7 +144,7 @@ async def test_set_light_wraps_composite_value(zuma_api, fake_session):
         {"power": True, "brightness": 40, "temperature": 3000,
          "lastTransitionPeriod": "ms500"}
     )
-    _, url, body = session.calls[0]
+    url, body = session.calls[0]
     assert url.endswith("/api/setData")
     assert body["path"] == "zuma:lightState"
     assert body["value"]["type"] == "zumaLightState"
@@ -115,7 +152,7 @@ async def test_set_light_wraps_composite_value(zuma_api, fake_session):
 
 
 async def test_get_light_unwraps_state(zuma_api, fake_session):
-    reply = '[{"type":"zumaLightState","zumaLightState":{"power":true,"brightness":17,"temperature":3869}}]'
+    reply = '{"value":{"type":"zumaLightState","zumaLightState":{"power":true,"brightness":17,"temperature":3869}}}'
     api = zuma_api.ZumaApi("host.invalid", fake_session(reply))
     light = await api.get_light()
     assert light == {"power": True, "brightness": 17, "temperature": 3869}
@@ -127,11 +164,10 @@ async def test_create_event_queue_subscribes_as_item(zuma_api, fake_session):
     api = zuma_api.ZumaApi("host.invalid", session)
     qid = await api.create_event_queue(["player:volume", "zuma:lightState"])
     assert qid == "{q-123}"
-    _, url, params = session.calls[0]
+    url, body = session.calls[0]
     assert url.endswith("/api/event/modifyQueue")
-    assert params["queueId"] == ""
-    subs = __import__("json").loads(params["subscribe"])
-    assert subs == [
+    assert "queueId" not in body
+    assert body["subscribe"] == [
         {"path": "player:volume", "type": "item"},
         {"path": "zuma:lightState", "type": "item"},
     ]

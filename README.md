@@ -116,24 +116,32 @@ hardware pairs a StreamUnlimited S800 audio module (which owns this API) with Zu
 light/MCU board, which is why audio is richly exposed and the lamp hides in the `zuma:`
 mirror.
 
+Every call is a JSON POST, matching the official nSDK client bindings:
+
 ```
-GET  /api/getData?path=<path>&roles=<comma,separated>
-GET  /api/getRows?path=<path>&roles=<r>&from=<i>&to=<i>
-POST /api/setData   {"path":..,"role":..,"value":..}
-GET  /api/event/modifyQueue?queueId=&subscribe=[..]&unsubscribe=[..]
-GET  /api/event/pollQueue?queueId=&timeout=<ms>
+POST /api/getData            {"path":..,"roles":[..],"type":"structure"}
+POST /api/getRows            {"path":..,"roles":[..],"from":<i>,"to":<i>,"type":"structure"}
+POST /api/setData            {"path":..,"role":..,"value":..}
+POST /api/event/modifyQueue  {"queueId":..,"subscribe":[..],"unsubscribe":[..]}
+POST /api/event/pollQueue    {"queueId":..,"timeout":..}
 ```
+
+`"type": "structure"` makes getData answer with an object keyed by role name
+(`{"value": ..., "title": ...}`) and getRows with one such object per row. Without it
+both answer with arrays in the order the roles were requested. The device also accepts
+the same calls as GETs with query parameters.
 
 Two things will trip you up:
 
-1. **Values are tagged unions.** A read returns `[{"i32_": 22, "type": "i32_"}]`, and a
+1. **Values are tagged unions.** A read returns `{"value": {"i32_": 22, "type": "i32_"}}`, and a
    write must re-tag with the matching type name. Booleans tag as `bool_`, not `i32_`,
    even though Python's `bool` is an `int`.
 2. **Application errors come back as HTTP 500 with a JSON body**, not a transport error:
-   `{"error": {"name": "CMAbstractWorker::invalidPath", "message": "..."}}`.
+   `{"error": {"name": "CMAbstractWorker::invalidPath", "message": "..."}}`. Some
+   failures are bare text instead, e.g. a stale event queue gets `400 Unknown queue id!`.
 
 Useful roles: `value`, `title`, `type`, `path`. Enumerate a container with
-`getRows?roles=path,type`.
+getRows and the roles `["path", "type"]`.
 
 Open ports on the unit: **80** StreamSDK API, **2019** TIDAL Connect, **7000** AirPlay,
 **8080 / 8085** unidentified (bare 404s), **41347** (ephemeral) the Rygel DLNA

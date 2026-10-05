@@ -65,8 +65,8 @@ async def report(api) -> None:
 
 async def walk(api, path: str, depth: int = 0, max_depth: int = 6) -> None:
     """Depth-first dump of a subtree."""
-    children = await api.get_rows(path, roles="path,type") if depth < max_depth else []
-    children = [(p, k) for p, k in ((r[0], r[1] if len(r) > 1 else None) for r in children) if p != path]
+    rows = await api.get_rows(path) if depth < max_depth else []
+    children = [(r.get("path"), r.get("type")) for r in rows if r.get("path") not in (None, path)]
     if not children:
         print(f"{'  ' * depth}{path} = {await api.get_value(path)!r}")
         return
@@ -94,8 +94,8 @@ async def main() -> None:
             if args.walk:
                 await walk(api, args.walk)
             elif args.ls:
-                for row in await api.get_rows(args.ls, roles="path,type"):
-                    print(f"  {(row[1] if len(row) > 1 else '?') or '?':10} {row[0]}")
+                for row in await api.get_rows(args.ls):
+                    print(f"  {row.get('type') or '?':10} {row.get('path')}")
             elif args.get:
                 print(await api.get_value(args.get))
             elif args.set:

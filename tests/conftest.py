@@ -49,8 +49,9 @@ def zuma_api():
 class FakeResponse:
     """Minimal stand-in for an aiohttp response context manager."""
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, status: int = 200) -> None:
         self._text = text
+        self.status = status
 
     async def text(self) -> str:
         return self._text
@@ -63,19 +64,16 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Records requests and replays one canned reply."""
+    """Records POSTed bodies and replays one canned reply."""
 
-    def __init__(self, reply: str = "true") -> None:
+    def __init__(self, reply: str = "true", status: int = 200) -> None:
         self.reply = reply
-        self.calls: list[tuple[str, str, dict | None]] = []
-
-    def get(self, url, params=None, timeout=None):
-        self.calls.append(("GET", url, params))
-        return FakeResponse(self.reply)
+        self.status = status
+        self.calls: list[tuple[str, dict | None]] = []
 
     def post(self, url, json=None, timeout=None):
-        self.calls.append(("POST", url, json))
-        return FakeResponse(self.reply)
+        self.calls.append((url, json))
+        return FakeResponse(self.reply, self.status)
 
 
 @pytest.fixture
